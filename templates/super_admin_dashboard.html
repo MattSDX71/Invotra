@@ -1,0 +1,95 @@
+{% extends 'base.html' %}
+{% block head %}
+<script>
+function toggleParent(parentId, checked) {
+  document.querySelectorAll('[data-parent="'+parentId+'"]').forEach(cb => cb.checked = checked);
+}
+</script>
+{% endblock %}
+{% block content %}
+<div class="hero"><h1>Super Admin</h1><p>Companies, locations, people, master items, GL accounts, and notifications.</p>
+<a class="btn btn-primary" href="{{ url_for('upload_master_sheet') }}">Upload Master Items</a></div>
+<div class="grid grid-3" style="margin-top:20px">
+<div class="card"><h3>Companies</h3><div class="kpi">{{ companies|length }}</div></div>
+<div class="card"><h3>Subunits</h3><div class="kpi">{{ subs|length }}</div></div>
+<div class="card"><h3>Active Users</h3><div class="kpi">{{ users|selectattr('status','equalto','active')|list|length }}</div></div></div>
+<div class="grid grid-2">
+<div class="card"><h2>Companies</h2><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="create_company">
+<label>New Company Name</label><input name="company_name" placeholder="Example: Sodexo" required>
+<button class="btn btn-primary">Create Company</button></form></div>
+<div class="card"><h2>Parent Locations</h2><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="create_parent">
+<label>Company</label><select name="company_id" required>{% for c in companies %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select>
+<label>Parent Location</label><input name="parent_name" placeholder="Example: East Texas A&M University" required>
+<button class="btn btn-primary">Create Parent</button></form></div>
+<div class="card"><h2>Subunits</h2><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="create_sub">
+<label>Parent</label><select name="parent_id" required>{% for p in parents %}<option value="{{ p.id }}">{{ p.company.name }} / {{ p.name }}</option>{% endfor %}</select>
+<label>Subunit</label><input name="sub_name" placeholder="Example: C-Store" required>
+<button class="btn btn-primary">Create Subunit</button></form></div>
+<div class="card"><h2>Pending Subunit Requests</h2><table><tr><th>Subunit</th><th>Requested By</th><th>Decision</th></tr>
+{% for r in requests %}<tr><td>{{ r.parent.name }} / {{ r.requested_name }}</td><td>{{ r.requested_by.full_name }}</td>
+<td><form method="post" action="{{ url_for('super_admin_sub_request',req_id=r.id,decision='approve') }}" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-small btn-primary">Approve</button></form>
+<form method="post" action="{{ url_for('super_admin_sub_request',req_id=r.id,decision='reject') }}" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-small btn-danger">Reject</button></form></td></tr>
+{% else %}<tr><td colspan="3">No requests.</td></tr>{% endfor %}</table></div></div>
+<div class="card"><h2>Create User</h2><p class="muted">Selecting a parent location visibly selects all its subunits. Users receive a temporary password and must change it at login.</p>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="create_user">
+<div class="grid grid-3"><div><label>Full Name</label><input name="full_name" required></div>
+<div><label>Email</label><input name="email" type="email" required></div>
+<div><label>Optional Phone</label><input name="phone" type="tel"></div></div>
+<label>Role</label><select name="role"><option value="user">User</option><option value="admin">Admin</option><option value="super_admin">Super Admin</option></select>
+<h3>Location Access</h3><div class="grid grid-2">{% for p in parents %}
+<div style="border:1px solid var(--line);border-radius:16px;padding:14px">
+<label style="display:flex;align-items:center;gap:10px"><input style="width:auto;margin:0" type="checkbox" onchange="toggleParent('{{ p.id }}', this.checked)"><strong>{{ p.company.name }} / {{ p.name }}</strong></label>
+{% for sub in p.sub_locations %}<label style="display:inline-flex;gap:6px;margin:5px 12px 5px 0;align-items:center"><input type="checkbox" style="width:auto;margin:0" data-parent="{{ p.id }}" name="sub_location_ids" value="{{ sub.id }}"> {{ sub.name }}</label>{% endfor %}
+</div>{% endfor %}</div><button class="btn btn-primary">Create User</button></form></div>
+<div class="grid grid-2">
+<div class="card"><h2>Pending Account Requests</h2><table><tr><th>Name</th><th>Location</th><th>Decide</th></tr>
+{% for r in account_requests %}<tr><td>{{ r.full_name }}<div class="muted">{{ r.email }}</div></td><td>{{ r.sub_location.display_name }}</td><td>
+<form method="post" action="{{ url_for('super_admin_user_request',req_id=r.id,decision='approve') }}" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-small btn-primary">Approve</button></form>
+<form method="post" action="{{ url_for('super_admin_user_request',req_id=r.id,decision='reject') }}" style="display:inline"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-small btn-danger">Reject</button></form>
+</td></tr>{% else %}<tr><td colspan="3">Nothing pending.</td></tr>{% endfor %}</table></div>
+<div class="card"><h2>Assign Existing User</h2><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="assign_user">
+<label>User</label><select name="user_id">{% for u in users if u.status=='active' %}<option value="{{ u.id }}">{{ u.full_name }} ({{ u.role }})</option>{% endfor %}</select>
+<label>Subunit</label><select name="sub_location_id">{% for sub in subs %}<option value="{{ sub.id }}">{{ sub.display_name }}</option>{% endfor %}</select>
+<button class="btn btn-primary">Assign Location</button></form></div></div>
+<div class="grid grid-2">
+<div class="card"><h2>GL Accounts</h2><p class="muted">Removing a GL hides it from future selections without deleting audit records.</p>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="create_gl">
+<label>Company</label><select name="company_id">{% for c in companies %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select>
+<div class="grid grid-2"><div><label>Code</label><input name="code" placeholder="60110020" required></div>
+<div><label>Description</label><input name="description" placeholder="BEVERAGE" required></div></div>
+<button class="btn btn-primary">Add GL Account</button></form><hr>
+{% for c in companies %}<form method="post" style="margin:10px 0" onsubmit="return confirm('Restore the default GL set? Additional GLs will be hidden. Historical records remain untouched.')"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="action" value="reset_gls"><input type="hidden" name="company_id" value="{{ c.id }}"><button class="btn btn-small">Restore {{ c.name }} Defaults</button></form>{% endfor %}
+<table><tr><th>Company</th><th>GL Code</th><th></th></tr>
+{% for gl in gls %}<tr><td>{{ gl.company.name }}</td><td>{{ gl.label }}</td>
+<td><form method="post" action="{{ url_for('super_admin_delete_gl',gl_id=gl.id) }}" onsubmit="return confirm('Remove this GL from active use?')"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-small btn-danger">Remove</button></form></td></tr>
+{% else %}<tr><td colspan="3">No active GL accounts.</td></tr>{% endfor %}</table></div>
+<div class="card"><h2>Master Items</h2><p>Each company has an independent catalog, shared by all its parent locations and subunits.</p>
+<a class="btn btn-primary" href="{{ url_for('upload_master_sheet') }}">Upload CSV</a>
+{% for c in companies %}<p><a class="btn" href="{{ url_for('download_master',company_id=c.id) }}">Download {{ c.name }} Master</a></p>{% endfor %}
+</div></div>
+<div class="card"><h2>User Directory</h2><p class="muted">Archived users cannot log in. Their completed inventory records are preserved for compliance.</p>
+<table><tr><th>Name &amp; Email</th><th>Role</th><th>Status</th><th>Location Access</th><th>Action</th></tr>
+{% for u in users %}<tr><td><strong>{{ u.full_name }}</strong><div class="muted">{{ u.email }}</div></td><td>{{ u.role|replace('_',' ')|title }}</td>
+<td><span class="pill">{{ u.status }}</span></td><td>{% for a in u.sub_location_access %}<span class="pill">{{ a.sub_location.name }}</span> {% else %}—{% endfor %}</td>
+<td>{% if u.id!=user.id and u.status=='active' %}<form method="post" action="{{ url_for('super_admin_delete_user',user_id=u.id) }}" onsubmit="return confirm('Archive user and revoke all access? Inventory history will remain available.')"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<button class="btn btn-small btn-danger">Archive / Remove</button></form>{% else %}—{% endif %}</td></tr>
+{% else %}<tr><td colspan="5">No users.</td></tr>{% endfor %}</table></div>
+<div class="grid grid-2">
+<div class="card"><h2>Email Notifications</h2><p class="muted">User and parent-location admin emails remain mandatory for submitted and approved inventory. Add optional extra addresses per event, separated by commas.</p>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="save_notifications">
+{% for event,label in [
+('inventory_submitted_user','Inventory Submitted — Counter'),
+('inventory_submitted_admin','Inventory Submitted — Location Admin'),
+('inventory_approved','Inventory Approved — Counter & Admin'),
+('inventory_rejected','Inventory Rejected — Counter'),
+('subunit_requested','New Subunit Request — Super Admin'),
+('account_requested','New Account Request — Super Admin') ] %}
+<label>{{ label }}</label><input type="text" name="{{ event }}" value="{{ notifications.get(event,'') }}" placeholder="optional@example.com, another@example.com">
+{% endfor %}<button class="btn btn-primary">Save Notification Routing</button></form></div>
+<div class="card"><h2>Test Email</h2><form method="post" action="{{ url_for('test_email') }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Recipient</label>
+<input type="email" name="recipient" value="{{ user.email }}" required><button class="btn btn-primary">Send Test Email</button></form>
+<h3>Recent Email Deliveries</h3><table><tr><th>Event</th><th>Recipients</th><th>Result</th></tr>
+{% for d in deliveries %}<tr><td>{{ d.event }}</td><td>{{ d.recipients }}</td><td><span class="pill">{{ d.status }}</span>{% if d.error %}<div class="muted">{{ d.error }}</div>{% endif %}</td></tr>
+{% else %}<tr><td colspan="3">No messages attempted yet.</td></tr>{% endfor %}</table></div></div>
+{% endblock %}

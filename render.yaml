@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: invotra
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    envVars:
+      - key: INVOTRA_ENV
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+    disk:
+      name: invotra-data
+      mountPath: /data
+      sizeGB: 1

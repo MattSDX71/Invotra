@@ -1,0 +1,6 @@
+{% extends 'base.html' %}{% block title %}Log in | Invotra{% endblock %}{% block content %}
+<div style="max-width:980px;margin:5vh auto" class="grid grid-2">
+  <div class="hero"><img src="{{ url_for('static', filename='invotra-logo-white.png') }}" style="width:260px;max-width:100%;margin-bottom:30px"><h1>Inventory, streamlined.</h1><p>Scanner-ready inventory sessions, approval workflows, master items, and GL summaries built for multi-location operations.</p></div>
+  <div class="card"><h1>Log in</h1><form method="post" autocomplete="on"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Email</label><input type="email" name="email" autocomplete="username" required><label>Password</label><input type="password" name="password" autocomplete="current-password" required><label style="display:flex;gap:8px;align-items:center"><input style="width:auto;margin:0" type="checkbox" name="remember_me"> Remember me</label><button class="btn btn-primary" type="submit">Log in</button></form><p><a class="muted" href="{{ url_for('forgot_password') }}">Reset password</a></p><p class="muted">Interested in an account? Reach out to us at <a href="mailto:info@invotra.us"><strong>info@invotra.us</strong></a></p></div>
+</div>
+{% endblock %}

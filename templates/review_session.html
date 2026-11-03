@@ -1,0 +1,14 @@
+{% extends 'base.html' %}{% block content %}<div class="hero"><h1>Review Inventory #{{ inv.id }}</h1>
+<p>{{ inv.sub_location.display_name }} · {{ inv.created_by.full_name }}</p></div>
+<div class="grid grid-2" style="margin-top:20px"><div class="card"><h2>Count Summary</h2><p>Status: <strong>{{ inv.status }}</strong></p>
+<p>Quantity: {{ inv.total_quantity }}</p><h3>Total Value: ${{ inv.total_value }}</h3>
+<a class="btn" href="{{ url_for('inventory_csv_download',session_id=inv.id) }}">Download Count CSV</a></div>
+<div class="card"><h2>GL Summary</h2><table><tr><th>GL</th><th>Value</th></tr>{% for gl,total in gl_totals %}<tr><td>{{ gl }}</td><td>${{ total }}</td></tr>{% else %}<tr><td colspan="2">No totals</td></tr>{% endfor %}</table></div></div>
+<div class="card"><h2>Items</h2><table><tr><th>Name</th><th>UPC</th><th>Type</th><th>GL</th><th>Qty</th><th>Value</th></tr>
+{% for l in inv.lines %}<tr><td>{{ l.item_name_snapshot }}</td><td>{{ l.scanned_upc }}</td><td>{{ l.scan_type }}</td><td>{{ l.gl_label_snapshot }}</td><td>{{ l.quantity }}</td><td>${{ l.extended_value }}</td></tr>{% else %}<tr><td colspan="6">No items</td></tr>{% endfor %}</table></div>
+{% if inv.status=='submitted' %}<div class="card"><h2>Approve / Reject</h2>
+{% if pending_unknowns %}<p class="flash error">You must review {{ pending_unknowns|length }} missing item(s) before approval.</p>
+{% for u in pending_unknowns %}<p><a class="btn btn-primary" href="{{ url_for('admin_review_unknown',unknown_id=u.id) }}">Review {{ u.proposed_name }} ({{ u.scanned_upc }})</a></p>{% endfor %}{% endif %}
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Rejection reason</label><textarea name="rejection_note" placeholder="Required only when rejecting"></textarea>
+<button class="btn btn-primary" name="action" value="approve" {% if pending_unknowns %}disabled title="Review missing items first"{% endif %}>Approve Inventory</button>
+<button class="btn btn-danger" name="action" value="reject">Reject Inventory</button></form></div>{% endif %}{% endblock %}

@@ -1,0 +1,16 @@
+{% extends 'base.html' %}{% block content %}
+<div class="hero"><h1>Inventory Reports</h1><p>All inventory history is retained for compliance and review.</p></div>
+<div class="card" style="margin-top:20px"><form method="get"><label>Filter Location</label><select name="sub_location_id"><option value="">All accessible locations</option>
+{% for loc in sub_locations %}<option value="{{ loc.id }}" {% if selected==loc.id %}selected{% endif %}>{{ loc.display_name }}</option>{% endfor %}</select>
+<button class="btn">Filter</button></form></div>
+{% if latest_approved %}<div class="grid grid-2">{% for inv in latest_approved %}<div class="card"><h3>Latest Approved · {{ inv.sub_location.name }}</h3>
+<p class="muted">{{ inv.sub_location.parent.name }} · {{ inv.approved_at.strftime('%Y-%m-%d %H:%M UTC') if inv.approved_at else '' }}</p>
+<div class="kpi">${{ inv.total_value }}</div><p>{{ inv.total_quantity }} units · Session #{{ inv.id }}</p>
+<table><tr><th>GL</th><th>Value</th></tr>{% for gl,total in gl_totals(inv) %}<tr><td>{{ gl }}</td><td>${{ total }}</td></tr>{% endfor %}</table></div>
+{% endfor %}</div>{% endif %}
+<div class="card"><h2>All Inventory Sessions</h2><table><thead><tr><th>ID</th><th>Location</th><th>User</th><th>Status</th><th>Started (UTC)</th><th>Submitted (UTC)</th><th>Total</th><th>Actions</th></tr></thead><tbody>
+{% for s in sessions %}<tr><td>#{{ s.id }}</td><td>{{ s.sub_location.display_name }}</td><td>{{ s.created_by.full_name }}</td>
+<td><span class="pill">{{ s.status|replace('_',' ')|title }}</span></td><td>{{ s.started_at.strftime('%Y-%m-%d %H:%M') }}</td>
+<td>{{ s.submitted_at.strftime('%Y-%m-%d %H:%M') if s.submitted_at else '—' }}</td><td>${{ s.total_value }}</td>
+<td><a class="btn btn-small" href="{{ url_for('inventory_session',session_id=s.id) }}">View</a> <a class="btn btn-small" href="{{ url_for('inventory_csv_download',session_id=s.id) }}">CSV</a></td></tr>
+{% else %}<tr><td colspan="8">No inventory records yet.</td></tr>{% endfor %}</tbody></table></div>{% endblock %}

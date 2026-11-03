@@ -1,0 +1,6 @@
+{% extends 'base.html' %}{% block content %}
+<div class="hero"><h1>Dashboard</h1><p>Start or resume inventory sessions without affecting anyone else’s count.</p><a class="btn btn-primary" href="{{ url_for('inventory_start') }}">Start Inventory</a></div>
+<div class="grid grid-2">
+  <div class="card"><h2>Active Sessions</h2><table><tr><th>ID</th><th>Location</th><th>Started</th><th></th></tr>{% for s in active_sessions %}<tr><td>#{{ s.id }}</td><td>{{ s.sub_location.display_name }}</td><td>{{ s.started_at.strftime('%Y-%m-%d %I:%M %p') }}</td><td><a class="btn btn-small" href="{{ url_for('inventory_session', session_id=s.id) }}">Resume</a></td></tr>{% else %}<tr><td colspan="4">No active sessions.</td></tr>{% endfor %}</table></div>
+  <div class="card"><h2>Recent Inventory</h2><table><tr><th>ID</th><th>Status</th><th>Total</th><th></th></tr>{% for s in recent_sessions %}<tr><td>#{{ s.id }}</td><td><span class="pill">{{ s.status }}</span></td><td>${{ s.total_value }}</td><td><a href="{{ url_for('inventory_session', session_id=s.id) }}">Open</a></td></tr>{% else %}<tr><td colspan="4">No history yet.</td></tr>{% endfor %}</table></div>
+</div>{% endblock %}

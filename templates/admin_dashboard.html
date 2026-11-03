@@ -1,0 +1,27 @@
+{% extends 'base.html' %}{% block content %}
+<div class="hero"><h1>Admin</h1><p>Manage inventory reviews, missing items, and access for your assigned subunits.</p></div>
+<div class="grid grid-2" style="margin-top:20px"><div class="card"><h2>Inventories Awaiting Approval</h2>
+<table><tr><th>ID</th><th>User</th><th>Location</th><th>Total</th><th></th></tr>
+{% for s in pending_sessions %}<tr><td>#{{ s.id }}</td><td>{{ s.created_by.full_name }}</td><td>{{ s.sub_location.name }}</td><td>${{ s.total_value }}</td><td><a class="btn btn-small" href="{{ url_for('admin_review_session',session_id=s.id) }}">Review</a></td></tr>
+{% else %}<tr><td colspan="5">All caught up.</td></tr>{% endfor %}</table></div>
+<div class="card"><h2>Missing Item Queue</h2><table><tr><th>Item</th><th>UPC</th><th>Location</th><th></th></tr>
+{% for u in pending_unknowns %}<tr><td>{{ u.proposed_name }}</td><td>{{ u.scanned_upc }}</td><td>{{ u.sub_location.name }}</td><td><a class="btn btn-small" href="{{ url_for('admin_review_unknown',unknown_id=u.id) }}">Review</a></td></tr>
+{% else %}<tr><td colspan="4">No missing items.</td></tr>{% endfor %}</table></div></div>
+<div class="grid grid-2"><div class="card"><h2>Request Account</h2><p class="muted">You can only request access for subunits assigned to you. A super admin approves the account.</p>
+<form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="request_user"><label>Full Name</label><input name="full_name" required><label>Email</label><input type="email" name="email" required>
+<label>Subunit</label><select name="sub_location_id" required>{% for s in sub_locations %}<option value="{{ s.id }}">{{ s.display_name }}</option>{% endfor %}</select>
+<button class="btn btn-primary">Request Account</button></form></div>
+<div class="card"><h2>Request New Subunit</h2><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="action" value="request_sub_location"><label>Parent Location</label>
+<select name="parent_id" required>{% for p in parent_locations %}<option value="{{ p.id }}">{{ p.company.name }} / {{ p.name }}</option>{% endfor %}</select>
+<label>Subunit Name</label><input name="requested_name" placeholder="Example: The Junction" required>
+<button class="btn btn-primary">Send Request</button></form></div></div>
+<div class="card"><h2>Manage User Access</h2><p class="muted">Location admins can remove users, but not other admins or super admins.</p>
+<table><tr><th>User</th><th>Role</th><th>Assigned Locations</th></tr>
+{% for u in users %}<tr><td>{{ u.full_name }}<br><span class="muted">{{ u.email }}</span></td><td>{{ u.role }}</td><td>
+{% for a in u.sub_location_access %}{% if a.sub_location_id in sub_locations|map(attribute='id')|list %}
+{% if user.role=='super_admin' or (u.role=='user' and u.id != user.id) %}
+<form method="post" action="{{ url_for('remove_user_location') }}" style="display:inline-block;margin:2px" onsubmit="return confirm('Remove this user from this location?')"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<input type="hidden" name="user_id" value="{{ u.id }}"><input type="hidden" name="sub_location_id" value="{{ a.sub_location_id }}">
+<button class="btn btn-small">Remove {{ a.sub_location.name }}</button></form>
+{% else %}<span class="pill">{{ a.sub_location.name }}</span>{% endif %}{% endif %}{% endfor %}</td></tr>{% else %}<tr><td colspan="3">No users assigned yet.</td></tr>{% endfor %}</table></div>
+{% endblock %}
