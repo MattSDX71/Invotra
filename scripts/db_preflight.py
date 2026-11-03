@@ -32,8 +32,10 @@ def main():
         return 0
     if database_url.startswith("sqlite:////"):
         path = Path(database_url.replace("sqlite:////", "/", 1))
-    elif os.getenv("INVOTRA_ENV") == "production":
+    elif Path("/data").is_dir():
         path = Path("/data/invotra.db")
+    elif os.getenv("INVOTRA_ENV") == "production":
+        raise RuntimeError("Production /data disk is not mounted; refusing ephemeral database")
     else:
         print("Invotra preflight: local database; no production snapshot required.")
         return 0
