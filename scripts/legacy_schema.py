@@ -5,8 +5,69 @@ and inventory snapshots are added and populated. No DELETE/DROP operations.
 """
 from __future__ import annotations
 import sqlite3
+import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+
+def relax_legacy_session_location_constraint(database_path: str | Path) -> bool:
+    """Make obsolete location_id nullable while retaining its historical values.
+
+    Old versions require inventory_session.location_id. The newer model only
+    inserts sub_location_id, so adding the new column alone cannot fix INSERTs.
+    SQLite cannot ALTER a column's nullability: rebuild exactly this table
+    transactionally, preserving its schema, indexes, triggers and rows.
+    """
+    path = Path(database_path)
+    if not path.is_file():
+        return False
+    with sqlite3.connect(str(path), timeout=30) as db:
+        info = db.execute('PRAGMA table_info("inventory_session")').fetchall()
+        legacy = next((row for row in info if row[1] == "location_id"), None)
+        if not legacy or not legacy[3]:
+            return False
+        # This must run before BEGIN; SQLite will not change foreign_keys
+        # when a transaction is already open.
+        db.execute('PRAGMA foreign_keys=OFF')
+        schema = db.execute('SELECT sql FROM sqlite_master WHERE type="table" AND name="inventory_session"').fetchone()
+        if not schema or not schema[0]:
+            raise RuntimeError('Cannot inspect inventory_session schema; database unchanged')
+        original = schema[0]
+        # Match this one column only, avoiding an accidental constraint change.
+        column = r'((?:"location_id"|`location_id`|\[location_id\]|location_id)\s+INTEGER)\s+NOT\s+NULL\b'
+        newddl, occurrences = re.subn(column, r'\1', original, flags=re.I)
+        if occurrences != 1:
+            raise RuntimeError('Unrecognized legacy location_id DDL; database unchanged')
+        head = r'^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"inventory_session"|`inventory_session`|\[inventory_session\]|inventory_session)\b'
+        # Quoted names terminate with a quote rather than a word boundary.
+        head = r'^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"inventory_session"|`inventory_session`|\[inventory_session\]|inventory_session)'
+        newddl, renamed = re.subn(head, 'CREATE TABLE "__invotra_session_upgrade"', newddl, count=1, flags=re.I)
+        if renamed != 1:
+            raise RuntimeError('Unrecognized inventory_session CREATE TABLE; database unchanged')
+        objects = db.execute('SELECT type,sql FROM sqlite_master WHERE tbl_name="inventory_session" AND type IN ("index","trigger") AND sql IS NOT NULL ORDER BY type').fetchall()
+        count_before = db.execute('SELECT COUNT(*) FROM "inventory_session"').fetchone()[0]
+        cols = [row[1] for row in info]
+        qcols = ', '.join('"' + c.replace('"','""') + '"' for c in cols)
+        try:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute(newddl)
+            db.execute(f'INSERT INTO "__invotra_session_upgrade" ({qcols}) SELECT {qcols} FROM "inventory_session"')
+            if db.execute('SELECT COUNT(*) FROM "__invotra_session_upgrade"').fetchone()[0] != count_before:
+                raise RuntimeError('Legacy session count mismatch; migration rolled back')
+            db.execute('DROP TABLE "inventory_session"')
+            db.execute('ALTER TABLE "__invotra_session_upgrade" RENAME TO "inventory_session"')
+            for kind, ddl in objects:
+                db.execute(ddl)
+            if db.execute('PRAGMA foreign_key_check').fetchall():
+                raise RuntimeError('Foreign key validation failed; migration rolled back')
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.execute('PRAGMA foreign_keys=ON')
+        return True
 
 
 def migrate(database_path: str | Path) -> list[str]:
@@ -14,6 +75,21 @@ def migrate(database_path: str | Path) -> list[str]:
     if not path.is_file():
         return []
     actions = []
+    # Release legacy NOT NULL constraint before new ORM sessions are inserted.
+    # A one-time backup is made by the startup preflight, or here when gunicorn
+    # is run directly and the constraint is still present.
+    with sqlite3.connect(str(path), timeout=30) as check:
+        old_column = next((r for r in check.execute('PRAGMA table_info("inventory_session")') if r[1] == "location_id"), None)
+    if old_column and old_column[3]:
+        from datetime import timezone
+        backup_dir = path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup_file = backup_dir / f"invotra-before-legacy-session-constraint-{stamp}.db"
+        with sqlite3.connect(str(path), timeout=30) as src, sqlite3.connect(str(backup_file)) as dst:
+            src.backup(dst)
+        if relax_legacy_session_location_constraint(path):
+            actions.append("inventory_session.location_id now nullable (historical values preserved)")
     con = sqlite3.connect(str(path), timeout=30)
     con.row_factory = sqlite3.Row
     try:
