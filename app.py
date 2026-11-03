@@ -24,6 +24,7 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import or_, text, func, case
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
+from scripts.legacy_schema import migrate as migrate_legacy_schema
 
 
 def normalize_database_url(url: str) -> str:
@@ -542,9 +543,29 @@ def ensure_legacy_user_phone_column() -> None:
 
 
 def ensure_seed_data() -> None:
+    # SQLAlchemy create_all only creates new tables; it never alters legacy tables.
+    # Create hierarchy tables first, then migrate old location_id values with explicit
+    # location mappings before issuing any ORM queries.
     ensure_legacy_user_phone_column()
-    # create_all does not delete data or change existing columns. Existing v6/v7 schemas are retained.
     db.create_all()
+    if db.engine.dialect.name == "sqlite":
+        # Backup is taken by preflight (when start.sh is used). For direct gunicorn,
+        # ensure a backup before changing historic records as well.
+        dbpath = Path(db.engine.url.database).resolve()
+        if dbpath.exists():
+            backup_dir = dbpath.parent / "backups"
+            backup_dir.mkdir(exist_ok=True)
+            # Backup only for installations that require a legacy migration.
+            with sqlite3.connect(str(dbpath)) as conn:
+                fields = {r[1] for r in conn.execute('PRAGMA table_info("inventory_session")')}
+                needs_migration = bool(fields) and 'sub_location_id' not in fields
+            if needs_migration:
+                stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+                with sqlite3.connect(str(dbpath)) as src, sqlite3.connect(str(backup_dir / f'invotra-before-location-upgrade-{stamp}.db')) as dest:
+                    src.backup(dest)
+                app.logger.warning('Invotra backed up legacy database before hierarchy migration.')
+            for operation in migrate_legacy_schema(dbpath):
+                app.logger.warning('Invotra schema migration: %s', operation)
     # On a fresh install, bootstrap a super admin through Render secrets. Never install a public default password.
     if not User.query.first():
         email = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
