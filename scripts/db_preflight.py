@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 CHECK = {
-    "user": {"id", "full_name", "email", "password_hash", "role", "status", "initial_password_reset_required"},
+    "user": {"id", "full_name", "email", "phone", "password_hash", "role", "status", "initial_password_reset_required"},
     "company": {"id", "name", "active"},
     "parent_location": {"id", "company_id", "name"},
     "sub_location": {"id", "parent_id", "name"},
@@ -60,7 +60,7 @@ def main():
         # Snapshot even an incompatible database before stopping, to protect its data.
         backups=path.parent/'backups'
         backups.mkdir(parents=True,exist_ok=True)
-        stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
         destination=backups/f"invotra-before-start-{stamp}.db"
         with sqlite3.connect(str(destination)) as dest:
             source.backup(dest)
@@ -68,6 +68,15 @@ def main():
         old=sorted(backups.glob('invotra-before-start-*.db'))
         for extra in old[:-5]:
             extra.unlink()
+        # Safe, additive migration for databases created before the profile phone field.
+        # Only apply AFTER writing the backup. Never drop/recreate tables or modify rows.
+        if 'user' in tables:
+            existing_user_columns = {row[1] for row in source.execute('PRAGMA table_info("user")')}
+            if 'phone' not in existing_user_columns:
+                source.execute('ALTER TABLE "user" ADD COLUMN "phone" VARCHAR(50)')
+                source.commit()
+                print('Invotra migration: added nullable user.phone; users and historical records preserved.')
+                errors = [err for err in errors if err != 'table user missing columns: phone']
         if errors:
             print("SCHEMA INCOMPATIBLE — deployment stopped safely. No data was deleted.")
             for err in errors:
