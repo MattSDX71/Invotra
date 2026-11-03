@@ -13,6 +13,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import Iterable, Optional
+import sqlite3
+from pathlib import Path
+from datetime import timezone
 
 from flask import Flask, Response, abort, flash, redirect, render_template, request, session, url_for, g
 from flask_mail import Mail, Message
@@ -492,7 +495,54 @@ def seed_company_gls(company: Company) -> None:
             db.session.add(GLAccount(company_id=company.id, code=code, description=desc, active=True))
 
 
+def ensure_legacy_user_phone_column() -> None:
+    """Add one nullable column before any ORM queries against an older user table.
+
+    Unlike a separate preflight script, this uses Flask-SQLAlchemy's *actual*
+    configured database path, and runs even when Render was configured with
+    `gunicorn app:app` instead of `bash start.sh`.
+
+    It never recreates tables or alters existing user rows. A transactionally
+    consistent database backup is written before making any schema change.
+    """
+    if db.engine.dialect.name != "sqlite":
+        return  # PostgreSQL schema upgrades must use Alembic migrations.
+
+    database_name = db.engine.url.database
+    if not database_name:
+        raise RuntimeError("Cannot determine SQLite database path for migration")
+    database_path = Path(database_name).resolve()
+    if not database_path.exists():
+        return  # New install; create_all will create the phone field.
+
+    with sqlite3.connect(str(database_path), timeout=30) as connection:
+        user_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='user'"
+        ).fetchone()
+        if not user_table:
+            return
+        fields = {row[1] for row in connection.execute('PRAGMA table_info("user")')}
+        if "phone" in fields:
+            return
+
+        backup_dir = database_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup_path = backup_dir / f"invotra-before-user-phone-{stamp}.db"
+        with sqlite3.connect(str(backup_path)) as backup:
+            connection.backup(backup)
+        app.logger.warning("Invotra legacy database backup: %s", backup_path)
+
+        # SQLite DDL is idempotent with the metadata check above. If another
+        # process migrated between inspection and ALTER, fail rather than
+        # modifying something unexpected.
+        connection.execute('ALTER TABLE "user" ADD COLUMN "phone" VARCHAR(50)')
+        connection.commit()
+        app.logger.warning("Invotra migration applied to %s: added user.phone", database_path)
+
+
 def ensure_seed_data() -> None:
+    ensure_legacy_user_phone_column()
     # create_all does not delete data or change existing columns. Existing v6/v7 schemas are retained.
     db.create_all()
     # On a fresh install, bootstrap a super admin through Render secrets. Never install a public default password.
