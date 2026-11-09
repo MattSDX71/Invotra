@@ -1,5 +1,6 @@
 {% extends 'base.html' %}{% block content %}
 <div class="hero"><h1>Admin</h1><p>Manage inventory reviews, missing items, and access for your assigned subunits.</p></div>
+<form method="get" action="{{ url_for('admin_dashboard') }}" style="max-width:480px;margin:16px 0"><label>Parent location</label><select name="parent_id" onchange="this.form.submit()">{% for p in parent_locations %}<option value="{{ p.id }}" {% if parent_filter==p.id %}selected{% endif %}>{{ p.company.name }} / {{ p.name }}</option>{% endfor %}</select></form>
 <div class="grid grid-2" style="margin-top:20px"><div class="card"><h2>Inventories Awaiting Approval</h2>
 <table><tr><th>ID</th><th>User</th><th>Location</th><th>Total</th><th></th></tr>
 {% for s in pending_sessions %}<tr><td>#{{ s.id }}</td><td>{{ s.created_by.full_name }}</td><td>{{ s.sub_location.name }}</td><td>${{ s.total_value }}</td><td><a class="btn btn-small" href="{{ url_for('admin_review_session',session_id=s.id) }}">Review</a></td></tr>
@@ -18,7 +19,7 @@
 <div class="card"><h2>Manage User Access</h2><p class="muted">Location admins can remove users, but not other admins or super admins.</p>
 <table><tr><th>User</th><th>Role</th><th>Assigned Locations</th></tr>
 {% for u in users %}<tr><td>{{ u.full_name }}<br><span class="muted">{{ u.email }}</span></td><td>{{ u.role }}</td><td>
-{% for a in u.sub_location_access %}{% if a.sub_location_id in sub_locations|map(attribute='id')|list %}
+{% for a in u.sub_location_access %}{% if a.sub_location_id in display_sub_ids %}
 {% if user.role=='super_admin' or (u.role=='user' and u.id != user.id) %}
 <form method="post" action="{{ url_for('remove_user_location') }}" style="display:inline-block;margin:2px" onsubmit="return confirm('Remove this user from this location?')"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <input type="hidden" name="user_id" value="{{ u.id }}"><input type="hidden" name="sub_location_id" value="{{ a.sub_location_id }}">

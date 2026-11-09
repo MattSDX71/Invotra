@@ -1,1 +1,26 @@
-{% extends 'base.html' %}{% block content %}<div class="card" style="max-width:720px"><h1>Start Inventory</h1><form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Location</label><select name="sub_location_id" required>{% for loc in sub_locations %}<option value="{{ loc.id }}">{{ loc.display_name }}</option>{% endfor %}</select><button class="btn btn-primary">Start Session</button></form></div>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Start Inventory | Invotra{% endblock %}
+{% block head %}
+<style>
+.start-inventory{max-width:600px;margin:0 auto}.start-inventory h1{margin-bottom:7px}.start-inventory .card{padding:clamp(16px,4vw,28px)}.start-inventory select{font-size:16px;min-height:52px}.start-inventory button{display:block;width:100%;min-height:52px;font-size:1.05rem}.start-hint{color:var(--muted);line-height:1.4;font-size:.92rem}
+@media(max-width:650px){body:has(.start-inventory) .content{padding:12px}body:has(.start-inventory) .sidebar{padding:9px 12px}body:has(.start-inventory) .sidebar .logo{display:none}body:has(.start-inventory) .sidebar .nav{display:flex;gap:5px;overflow:auto}body:has(.start-inventory) .sidebar .nav a{padding:7px 9px;margin:0;white-space:nowrap;font-size:.8rem}body:has(.start-inventory) .topbar{height:40px}}
+</style>
+{% endblock %}
+{% block content %}
+<div class="start-inventory">
+ <div class="card">
+  <h1>Start inventory</h1>
+  <p class="start-hint">Select the store or dining location you are counting. Your session is saved separately from everyone else's.</p>
+  {% if sub_locations %}
+  <form method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+   <label for="location-choice">Choose location</label>
+   <select id="location-choice" name="sub_location_id" required>
+    <option value="">Select location</option>
+    {% for loc in sub_locations %}<option value="{{ loc.id }}">{{ loc.parent.name }} / {{ loc.name }}</option>{% endfor %}
+   </select>
+   <button type="submit" class="btn btn-primary">Start counting</button>
+  </form>
+  {% else %}<p class="muted">No active subunits are assigned to your account. Contact your location administrator.</p>{% endif %}
+ </div>
+</div>
+{% endblock %}
