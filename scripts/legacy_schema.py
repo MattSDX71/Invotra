@@ -70,6 +70,117 @@ def relax_legacy_session_location_constraint(database_path: str | Path) -> bool:
         return True
 
 
+
+# Columns from the older inventory schema are kept for audit/history, but new
+# ORM inserts no longer populate them. SQLite's NOT NULL constraint must be
+# removed from those obsolete columns or new rows will fail to save.
+LEGACY_OPTIONAL_COLUMNS = {
+    "unknown_item": frozenset({
+        "company_id", "location_id", "gl_account_id", "each_upc_code",
+        "case_upc_code", "each_cost", "case_cost", "proposed_cost",
+        "proposed_gl_account", "created_by_id",
+    }),
+    "inventory_line": frozenset({
+        "company_id", "location_id", "upc_code", "unit_type", "unit_cost",
+        "item_name", "is_missing", "cost", "gl_account_snapshot",
+    }),
+}
+
+
+def _split_table_definitions(ddl: str) -> tuple[str, list[str], str]:
+    """Split column/constraint declarations only at top-level commas."""
+    left = ddl.find("(")
+    right = ddl.rfind(")")
+    if left < 0 or right <= left:
+        raise RuntimeError("Unrecognized SQLite CREATE TABLE syntax; no changes applied")
+    definitions, start, depth, quoted = [], left + 1, 0, None
+    body = ddl[left + 1:right]
+    for i, char in enumerate(body):
+        if quoted:
+            if char == quoted:
+                quoted = None
+        elif char in ('"', "'", "`"):
+            quoted = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "," and depth == 0:
+            definitions.append(body[start - (left + 1):i])
+            start = left + 1 + i + 1
+    definitions.append(body[start - (left + 1):])
+    return ddl[:left + 1], definitions, ddl[right:]
+
+
+def relax_legacy_item_constraints(database_path: str | Path) -> list[str]:
+    """Remove obsolete NOT NULL rules without changing existing inventory data.
+
+    Rebuild only affected SQLite tables in a transaction, preserving all rows,
+    explicit indexes, triggers, and foreign keys. The operation is repeatable.
+    A caller must create a SQLite backup before invoking this function.
+    """
+    path = Path(database_path)
+    if not path.is_file():
+        return []
+    changes = []
+    with sqlite3.connect(str(path), timeout=30) as con:
+        con.execute("PRAGMA busy_timeout=30000")
+        for table, obsolete_columns in LEGACY_OPTIONAL_COLUMNS.items():
+            info = con.execute(f'PRAGMA table_info("{table}")').fetchall()
+            candidates = {r[1] for r in info if r[3] and r[1] in obsolete_columns}
+            if not candidates:
+                continue
+            sql_row = con.execute('SELECT sql FROM sqlite_master WHERE type="table" AND name=?', (table,)).fetchone()
+            if not sql_row or not sql_row[0]:
+                raise RuntimeError(f"Cannot inspect legacy {table}; no changes applied")
+            prefix, definitions, suffix = _split_table_definitions(sql_row[0])
+            edited = set()
+            for i, definition in enumerate(definitions):
+                match = re.match(r'\s*(?:"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([A-Za-z_][A-Za-z0-9_]*))(?=\s)', definition)
+                if not match:
+                    continue
+                name = next((x for x in match.groups() if x is not None), None)
+                if name in candidates:
+                    definitions[i], count = re.subn(r'\s+NOT\s+NULL\b', '', definition, count=1, flags=re.I)
+                    if count != 1:
+                        raise RuntimeError(f"Unexpected {table}.{name} DDL; refusing migration")
+                    edited.add(name)
+            if edited != candidates:
+                raise RuntimeError(f"Cannot safely relax {table}: {sorted(candidates - edited)}")
+            rewritten = prefix + ','.join(definitions) + suffix
+            heading = rf'^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"{table}"|`{table}`|\[{table}\]|{table})(?=\s|\()'
+            rewritten, count = re.subn(heading, f'CREATE TABLE "__invotra_{table}_upgrade"', rewritten, count=1, flags=re.I)
+            if count != 1:
+                raise RuntimeError(f"Cannot safely rename {table} in DDL")
+            objects = con.execute('SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ("index","trigger") AND sql IS NOT NULL ORDER BY type', (table,)).fetchall()
+            qcols = ', '.join('"' + r[1].replace('"', '""') + '"' for r in info)
+            original_count = con.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            # Changing foreign_keys must occur outside the transaction.
+            con.commit()
+            con.execute('PRAGMA foreign_keys=OFF')
+            try:
+                con.execute('BEGIN IMMEDIATE')
+                con.execute(rewritten)
+                con.execute(f'INSERT INTO "__invotra_{table}_upgrade" ({qcols}) SELECT {qcols} FROM "{table}"')
+                if con.execute(f'SELECT COUNT(*) FROM "__invotra_{table}_upgrade"').fetchone()[0] != original_count:
+                    raise RuntimeError(f"{table} row count changed; rolling back")
+                con.execute(f'DROP TABLE "{table}"')
+                con.execute(f'ALTER TABLE "__invotra_{table}_upgrade" RENAME TO "{table}"')
+                for (ddl,) in objects:
+                    con.execute(ddl)
+                failures = con.execute('PRAGMA foreign_key_check').fetchall()
+                if failures:
+                    raise RuntimeError(f"Foreign-key validation failed for {table}; rolling back: {failures[:3]}")
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+            finally:
+                con.execute('PRAGMA foreign_keys=ON')
+            changes.append(f'{table}: obsolete NOT NULL relaxed for {", ".join(sorted(edited))}')
+    return changes
+
+
 def migrate(database_path: str | Path) -> list[str]:
     path = Path(database_path)
     if not path.is_file():
@@ -81,7 +192,6 @@ def migrate(database_path: str | Path) -> list[str]:
     with sqlite3.connect(str(path), timeout=30) as check:
         old_column = next((r for r in check.execute('PRAGMA table_info("inventory_session")') if r[1] == "location_id"), None)
     if old_column and old_column[3]:
-        from datetime import timezone
         backup_dir = path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -90,6 +200,22 @@ def migrate(database_path: str | Path) -> list[str]:
             src.backup(dst)
         if relax_legacy_session_location_constraint(path):
             actions.append("inventory_session.location_id now nullable (historical values preserved)")
+    # Preserve legacy unknown-item and inventory-line rows while permitting the
+    # new ORM to insert rows without legacy-only fields such as company_id.
+    with sqlite3.connect(str(path), timeout=30) as probe:
+        must_relax = any(
+            row[3] and row[1] in optional
+            for table, optional in LEGACY_OPTIONAL_COLUMNS.items()
+            for row in probe.execute(f'PRAGMA table_info("{table}")')
+        )
+    if must_relax:
+        backup_dir = path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup_file = backup_dir / f"invotra-before-legacy-missing-item-{stamp}.db"
+        with sqlite3.connect(str(path), timeout=30) as src, sqlite3.connect(str(backup_file)) as dst:
+            src.backup(dst)
+        actions.extend(relax_legacy_item_constraints(path))
     con = sqlite3.connect(str(path), timeout=30)
     con.row_factory = sqlite3.Row
     try:
