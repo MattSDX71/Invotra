@@ -5,6 +5,7 @@ import io
 import os
 import secrets
 import hashlib
+import html
 import logging
 import re
 import uuid
@@ -65,6 +66,7 @@ app.config["MAIL_PASSWORD"] = os.getenv("MAIL_PASSWORD")
 app.config["MAIL_DEFAULT_SENDER"] = os.getenv("MAIL_DEFAULT_SENDER", os.getenv("MAIL_USERNAME", "sodexo.leardistrict@gmail.com"))
 app.config["MAIL_SUPPRESS_SEND"] = os.getenv("MAIL_SUPPRESS_SEND", "false").lower() == "true"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+app.config["PUBLIC_APP_URL"] = os.getenv("PUBLIC_APP_URL", "https://dashboard.invotra.us").rstrip("/")
 
 if app.config["SQLALCHEMY_DATABASE_URI"].startswith("sqlite"):
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {"connect_args": {"timeout": 30}}
@@ -182,7 +184,7 @@ class InventorySession(db.Model):
     approved_at = db.Column(db.DateTime)
     approved_by_id = db.Column(db.Integer, db.ForeignKey("user.id"))
     rejection_note = db.Column(db.Text)
-    total_quantity = db.Column(db.Integer, default=0, nullable=False)
+    total_quantity = db.Column(db.Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     total_value = db.Column(db.Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     sub_location = db.relationship("SubLocation")
     created_by = db.relationship("User", foreign_keys=[created_by_user_id])
@@ -218,7 +220,7 @@ class InventoryLine(db.Model):
     gl_account_id = db.Column(db.Integer, db.ForeignKey("gl_account.id"), nullable=False)
     gl_label_snapshot = db.Column(db.String(160), nullable=False)
     unit_cost_snapshot = db.Column(db.Numeric(10, 2), default=Decimal("0.00"), nullable=False)
-    quantity = db.Column(db.Integer, default=1, nullable=False)
+    quantity = db.Column(db.Numeric(12, 2), default=Decimal("1.00"), nullable=False)
     extended_value = db.Column(db.Numeric(12, 2), default=Decimal("0.00"), nullable=False)
     session_ref = db.relationship("InventorySession", backref="lines")
     item_master = db.relationship("ItemMaster")
@@ -262,6 +264,69 @@ class NotificationRule(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     event = db.Column(db.String(40), nullable=False, unique=True)
     extra_recipients = db.Column(db.Text, nullable=False, default="")
+
+
+class ParentNotificationRule(db.Model):
+    # Optional extra recipients limited to one parent campus. Never send across companies.
+    id = db.Column(db.Integer, primary_key=True)
+    parent_id = db.Column(db.Integer, db.ForeignKey("parent_location.id"), nullable=False)
+    event = db.Column(db.String(40), nullable=False)
+    extra_recipients = db.Column(db.Text, nullable=False, default="")
+    __table_args__ = (db.UniqueConstraint("parent_id", "event", name="uq_parent_notification_event"),)
+
+
+class EmailTemplate(db.Model):
+    """Admin-editable message text. New table only; no destructive migration."""
+    id = db.Column(db.Integer, primary_key=True)
+    event = db.Column(db.String(60), unique=True, nullable=False)
+    subject = db.Column(db.String(250), nullable=False)
+    body = db.Column(db.Text, nullable=False)
+
+
+EMAIL_DEFAULTS = {
+    "account_created": (
+        "Your Invotra account is ready",
+        "Welcome to Invotra, {name}!\n\nYour email: {email}\nTemporary password: {temporary_password}\n\nSign in: {login_url}\nYou will be asked to choose a new password the first time you sign in.\nIf you didn't expect this account, contact your administrator."
+    ),
+    "inventory_submitted_user": (
+        "Inventory submitted — {location}",
+        "Thank you for completing inventory for {location}. Your inventory #{session_id} has been sent for approval.\n\nView your session: {session_url}"
+    ),
+    "inventory_submitted_admin": (
+        "Inventory ready for approval — {location}",
+        "{user} completed inventory #{session_id} for {location} on {submitted_at}.\n\nTotal counted: {quantity}\nPreliminary value: ${total}\n\nReview and approve: {approval_url}\nPlease review any missing items before approving."
+    ),
+    "inventory_approved": (
+        "Inventory approved — {location}",
+        "Inventory #{session_id} for {location} has been approved by {approver}.\n\nTotal counted: {quantity}\nTotal inventory value: ${total}\n\nGL ACCOUNT SUMMARY\n{gl_summary}\n\nView report: {report_url}"
+    ),
+}
+ALLOWED_EMAIL_VARIABLES = {"name", "email", "temporary_password", "login_url", "location", "session_id", "session_url", "user", "submitted_at", "quantity", "total", "approval_url", "approver", "gl_summary", "report_url"}
+
+
+def app_link(endpoint, **kwargs):
+    """Links always use the public dashboard hostname, never Render's internal host."""
+    return app.config["PUBLIC_APP_URL"] + url_for(endpoint, **kwargs)
+
+
+def render_email(event: str, values: dict[str, str]) -> tuple[str, str]:
+    template = EmailTemplate.query.filter_by(event=event).first()
+    subject, body = (template.subject, template.body) if template else EMAIL_DEFAULTS[event]
+    def substitute(match):
+        key = match.group(1)
+        return str(values.get(key, "")) if key in ALLOWED_EMAIL_VARIABLES else match.group(0)
+    return (re.sub(r"\{([a-z_]+)\}", substitute, subject),
+            re.sub(r"\{([a-z_]+)\}", substitute, body))
+
+
+def mail_html(body: str) -> str:
+    """Escaped HTML with clickable links; user-provided item names never become HTML."""
+    safe = html.escape(body)
+    safe = re.sub(r"https://[A-Za-z0-9./_?=&%#-]+", lambda m: f'<a href="{m.group(0)}" style="color:#d75a1b;font-weight:600">{m.group(0)}</a>', safe)
+    return ("<div style='font-family:Arial,Helvetica,sans-serif;color:#17345a;max-width:680px;line-height:1.6'>"
+            "<h2 style='background:#0b2547;color:white;padding:18px;border-radius:8px'>Invotra</h2>"
+            "<div style='padding:8px 12px;white-space:pre-wrap'>" + safe + "</div>"
+            "<p style='color:#6b7280;font-size:12px'>Invotra Inventory Management</p></div>")
 
 
 class LoginAttempt(db.Model):
@@ -380,6 +445,19 @@ def can_access_sub(user: User, sub_location_id: int) -> bool:
     return user.role == "super_admin" or sub_location_id in user_sub_ids(user)
 
 
+def can_review_parent_inventory(user: User, sub_location_id: int) -> bool:
+    """Parent-location admins can follow approval links for sibling subunits."""
+    if user.role == "super_admin":
+        return True
+    if user.role != "admin":
+        return False
+    target = db.session.get(SubLocation, sub_location_id)
+    if not target:
+        return False
+    return bool(SubLocation.query.join(UserSubLocationAccess, UserSubLocationAccess.sub_location_id == SubLocation.id)
+                .filter(UserSubLocationAccess.user_id == user.id, SubLocation.parent_id == target.parent_id).first())
+
+
 def parent_admins(parent_id: int) -> list[User]:
     sub_ids = [s.id for s in SubLocation.query.filter_by(parent_id=parent_id, active=True).all()]
     if not sub_ids:
@@ -388,6 +466,46 @@ def parent_admins(parent_id: int) -> list[User]:
              .filter(User.role == "admin", User.status == "active", UserSubLocationAccess.sub_location_id.in_(sub_ids))
              .distinct().all())
     return users
+
+
+def location_report_recipients(sub_location_id: int) -> list[str]:
+    """All active assigned staff at the counted subunit, plus parent admins."""
+    sub = db.session.get(SubLocation, sub_location_id)
+    if not sub:
+        return []
+    assigned = (User.query.join(UserSubLocationAccess, UserSubLocationAccess.user_id == User.id)
+                .filter(UserSubLocationAccess.sub_location_id == sub_location_id,
+                        User.status == "active").distinct().all())
+    return sorted({u.email for u in [*assigned, *parent_admins(sub.parent_id)]})
+
+
+def parent_notification_recipients(parent_id: int, event: str) -> list[str]:
+    rule = ParentNotificationRule.query.filter_by(parent_id=parent_id, event=event).first()
+    if not rule:
+        return []
+    return list(dict.fromkeys(re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                                 rule.extra_recipients or "")))
+
+
+def scan_quantity(raw: str) -> Decimal:
+    """Constrain scan increments to four quarter-unit choices."""
+    try:
+        value = Decimal(str(raw or "1"))
+    except InvalidOperation as exc:
+        raise ValueError("Choose a valid scan amount.") from exc
+    if value not in (Decimal("0.25"), Decimal("0.50"), Decimal("0.75"), Decimal("1.00")):
+        raise ValueError("Choose ¼, ½, ¾, or 1 unit per scan.")
+    return value
+
+
+def edit_quantity(raw: str) -> Decimal:
+    try:
+        value = Decimal(str(raw))
+    except InvalidOperation as exc:
+        raise ValueError("Invalid quantity") from exc
+    if not value.is_finite() or value < 0 or value > 100000 or value * 4 != (value * 4).to_integral_value():
+        raise ValueError("Use increments of 0.25 between 0 and 100000")
+    return value
 
 
 def company_super_admins() -> list[User]:
@@ -405,7 +523,7 @@ def send_email(to: str | Iterable[str], subject: str, body: str,
     try:
         if not app.config.get("MAIL_SERVER"):
             raise RuntimeError("MAIL_SERVER is not configured")
-        msg = Message(subject=subject, recipients=recipients, body=body,
+        msg = Message(subject=subject, recipients=recipients[:1], bcc=recipients[1:], body=body, html=mail_html(body),
                       sender=app.config.get("MAIL_DEFAULT_SENDER"))
         for filename, content_type, data in attachments or []:
             msg.attach(filename, content_type, data)
@@ -447,7 +565,7 @@ def recalc_session(inv: InventorySession) -> None:
     db.session.flush()
     qty, val = db.session.query(func.coalesce(func.sum(InventoryLine.quantity), 0),
         func.coalesce(func.sum(InventoryLine.extended_value), 0)).filter(InventoryLine.session_id == inv.id).one()
-    inv.total_quantity = int(qty)
+    inv.total_quantity = Decimal(str(qty)).quantize(Decimal("0.01"))
     inv.total_value = Decimal(str(val)).quantize(Decimal("0.01"))
 
 def find_item(company_id: int, upc: str) -> tuple[Optional[ItemMaster], Optional[str], Decimal]:
@@ -802,13 +920,19 @@ def inventory_start():
 def inventory_session(session_id):
     user = current_user()
     inv = db.session.get(InventorySession, session_id)
-    if not inv or (inv.created_by_user_id != user.id and (user.role not in ("admin", "super_admin") or not can_access_sub(user, inv.sub_location_id))):
+    if not inv or (inv.created_by_user_id != user.id and
+        not (can_access_sub(user, inv.sub_location_id) and
+             (user.role in ("admin", "super_admin") or inv.status == "approved"))):
         flash("Inventory session not found.", "error")
         return redirect(url_for("dashboard"))
     company_id = inv.sub_location.parent.company_id
     gl_accounts = GLAccount.query.filter_by(company_id=company_id, active=True).order_by(GLAccount.description).all()
     unknown_upc = request.args.get("unknown_upc")
-    return render_template("inventory_session.html", inv=inv, gl_totals=gl_totals(inv), gl_accounts=gl_accounts, unknown_upc=unknown_upc)
+    selected_scan_qty = request.args.get("scan_qty", "1")
+    if selected_scan_qty not in ("0.25", "0.5", "0.75", "1"):
+        selected_scan_qty = "1"
+    return render_template("inventory_session.html", inv=inv, gl_totals=gl_totals(inv),
+        gl_accounts=gl_accounts, unknown_upc=unknown_upc, selected_scan_qty=selected_scan_qty)
 
 
 @app.route("/inventory/<int:session_id>/scan", methods=["POST"])
@@ -822,6 +946,12 @@ def inventory_scan(session_id):
     if not upc or len(upc) > 100:
         flash("Scan or enter a valid UPC.", "error")
         return redirect(url_for("inventory_session", session_id=session_id))
+    try:
+        increment = scan_quantity(request.form.get("scan_qty", "1"))
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("inventory_session", session_id=session_id))
+    scan_qty_url = str(increment.normalize())
     company_id = inv.sub_location.parent.company_id
     # When a pending unknown UPC is scanned again, increment the existing missing-item count.
     pending = (UnknownItem.query.filter_by(session_id=inv.id, scanned_upc=upc, status="pending")
@@ -829,29 +959,29 @@ def inventory_scan(session_id):
     if pending:
         line = InventoryLine.query.filter_by(unknown_item_id=pending.id, session_id=inv.id).first()
         if line:
-            line.quantity += 1
+            line.quantity += increment
             line.extended_value = line.unit_cost_snapshot * line.quantity
             recalc_session(inv)
             db.session.commit()
             flash("Missing item count increased. Admin will price it.", "success")
-            return redirect(url_for("inventory_session", session_id=inv.id))
+            return redirect(url_for("inventory_session", session_id=inv.id, scan_qty=scan_qty_url))
     item, scan_type, unit_cost = find_item(company_id, upc)
     if not item:
-        return redirect(url_for("inventory_session", session_id=session_id, unknown_upc=upc))
+        return redirect(url_for("inventory_session", session_id=session_id, unknown_upc=upc, scan_qty=scan_qty_url))
     line = InventoryLine.query.filter_by(session_id=inv.id, scanned_upc=upc, scan_type=scan_type).first()
     if line:
-        line.quantity += 1
+        line.quantity += increment
         line.extended_value = Decimal(str(line.unit_cost_snapshot)) * line.quantity
     else:
         line = InventoryLine(session_id=inv.id, item_master_id=item.id, scanned_upc=upc,
             scan_type=scan_type, item_name_snapshot=item.item_name, gl_account_id=item.gl_account_id,
             gl_label_snapshot=item.gl_account.label, unit_cost_snapshot=unit_cost,
-            quantity=1, extended_value=unit_cost)
+            quantity=increment, extended_value=unit_cost * increment)
         db.session.add(line)
     recalc_session(inv)
     db.session.commit()
-    flash(f"Added {item.item_name} ({scan_type}).", "success")
-    return redirect(url_for("inventory_session", session_id=session_id))
+    flash(f"Added {increment.normalize()} × {item.item_name} ({scan_type}).", "success")
+    return redirect(url_for("inventory_session", session_id=session_id, scan_qty=scan_qty_url))
 
 
 @app.route("/inventory/<int:session_id>/unknown", methods=["POST"])
@@ -862,6 +992,11 @@ def inventory_unknown_submit(session_id):
     if not inv or inv.created_by_user_id != user.id or inv.status != "in_progress":
         abort(403)
     upc = request.form.get("scanned_upc", "").strip()
+    try:
+        increment = scan_quantity(request.form.get("scan_qty", "1"))
+    except ValueError:
+        abort(400)
+    scan_qty_url = str(increment.normalize())
     name = request.form.get("proposed_name", "").strip()
     gl = db.session.get(GLAccount, form_int("proposed_gl_account_id"))
     company_id = inv.sub_location.parent.company_id
@@ -885,11 +1020,11 @@ def inventory_unknown_submit(session_id):
     db.session.add(InventoryLine(session_id=inv.id, unknown_item_id=unknown.id,
         scanned_upc=upc, scan_type="unknown", item_name_snapshot=name,
         gl_account_id=gl.id, gl_label_snapshot=gl.label, unit_cost_snapshot=Decimal("0.00"),
-        quantity=1, extended_value=Decimal("0.00")))
+        quantity=increment, extended_value=Decimal("0.00")))
     recalc_session(inv)
     db.session.commit()
     flash("Missing item added and queued for admin pricing and approval.", "success")
-    return redirect(url_for("inventory_session", session_id=session_id))
+    return redirect(url_for("inventory_session", session_id=session_id, scan_qty=scan_qty_url))
 
 @app.route("/inventory/<int:session_id>/line/<int:line_id>", methods=["POST"])
 @login_required
@@ -900,10 +1035,8 @@ def edit_inventory_line(session_id, line_id):
     if not inv or not line or line.session_id != inv.id or inv.created_by_user_id != user.id or inv.status != "in_progress":
         abort(403)
     try:
-        quantity = int(request.form.get("quantity", ""))
-    except (TypeError, ValueError):
-        abort(400)
-    if not 0 <= quantity <= 100000:
+        quantity = edit_quantity(request.form.get("quantity", ""))
+    except ValueError:
         abort(400)
     if quantity == 0:
         if line.unknown_item_id:
@@ -934,19 +1067,22 @@ def inventory_submit(session_id):
     inv.submitted_at = datetime.utcnow()
     recalc_session(inv)
     db.session.commit()
-    attachment = [(f"inventory_session_{inv.id}.csv", "text/csv", session_csv_bytes(inv))]
-    ok_user = send_email([user.email]+extra_recipients("inventory_submitted_user"),
-        f"Inventory submitted - {inv.sub_location.name}",
-        f"Thank you for completing inventory for {inv.sub_location.display_name}. It has been sent for approval.",
-        attachment, event="inventory_submitted_user")
+    values = {"location": inv.sub_location.display_name, "session_id": str(inv.id),
+              "session_url": app_link("inventory_session", session_id=inv.id),
+              "user": user.full_name, "submitted_at": inv.submitted_at.strftime('%Y-%m-%d %H:%M UTC'),
+              "quantity": str(inv.total_quantity), "total": f"{inv.total_value:.2f}",
+              "approval_url": app_link("admin_review_session", session_id=inv.id)}
+    user_subject, user_body = render_email("inventory_submitted_user", values)
+    ok_user = send_email([user.email] + parent_notification_recipients(inv.sub_location.parent_id, "inventory_submitted_user"),
+                         user_subject, user_body, event="inventory_submitted_user")
     admins = parent_admins(inv.sub_location.parent_id)
-    emails = [a.email for a in admins] + extra_recipients("inventory_submitted_admin")
-    ok_admin = send_email(emails, f"Inventory ready for approval - {inv.sub_location.display_name}",
-        f"{user.full_name} has completed an inventory on {inv.submitted_at.strftime('%Y-%m-%d %H:%M UTC')}. "
-        f"Please log in to approve the inventory.\n\nLocation: {inv.sub_location.display_name}\nSession: #{inv.id}\n"
-        f"Items: {inv.total_quantity}\nPreliminary total: ${inv.total_value}\n\n"
-        f"Attached: item counts CSV. Missing items require pricing before final approval.", attachment,
-        event="inventory_submitted_admin") if emails else False
+    emails = [a.email for a in admins] + parent_notification_recipients(inv.sub_location.parent_id, "inventory_submitted_admin")
+    admin_subject, admin_body = render_email("inventory_submitted_admin", values)
+    # Retain the submission-stage count CSV for review; final GL-only emails have no attachment.
+    review_csv = [(f"inventory_session_{inv.id}.csv", "text/csv", session_csv_bytes(inv))]
+    ok_admin = send_email(emails, admin_subject, admin_body, review_csv, event="inventory_submitted_admin") if emails else False
+    if not emails:
+        app.logger.warning("No parent admin configured for inventory %s in parent %s", inv.id, inv.sub_location.parent_id)
     if not ok_user or not ok_admin:
         flash("Inventory saved and submitted, but one or more emails could not be delivered. Ask your admin to check Invotra.", "error")
     else:
@@ -961,7 +1097,10 @@ def reports():
     sub_ids = user_sub_ids(user)
     sessions_q = InventorySession.query.filter(InventorySession.sub_location_id.in_(sub_ids))
     if user.role == "user":
-        sessions_q = sessions_q.filter_by(created_by_user_id=user.id)
+        # Other users' unfinished sessions stay private. Approved reports are
+        # visible to all active users assigned to that subunit.
+        sessions_q = sessions_q.filter(or_(InventorySession.created_by_user_id == user.id,
+                                           InventorySession.status == "approved"))
     sessions_q = sessions_q.order_by(InventorySession.started_at.desc())
     selected = request.args.get("sub_location_id", type=int)
     if selected and selected not in sub_ids:
@@ -1021,17 +1160,25 @@ def admin_dashboard():
                 flash("Account request sent to super admins.", "success")
         return redirect(url_for("admin_dashboard"))
 
-    pending_sessions = (InventorySession.query.filter(InventorySession.sub_location_id.in_(sub_ids),
-        InventorySession.status == "submitted").order_by(InventorySession.submitted_at.desc()).all())
-    pending_unknowns = (UnknownItem.query.filter(UnknownItem.sub_location_id.in_(sub_ids),
-        UnknownItem.status == "pending").order_by(UnknownItem.id.desc()).all())
-    users = (User.query.join(UserSubLocationAccess, User.id == UserSubLocationAccess.user_id)
-        .filter(UserSubLocationAccess.sub_location_id.in_(sub_ids), User.status == "active")
-        .distinct().order_by(User.full_name).all())
-    sub_locations = SubLocation.query.filter(SubLocation.id.in_(sub_ids), SubLocation.active == True).order_by(SubLocation.name).all()
     parent_locations = (ParentLocation.query.join(SubLocation, ParentLocation.id == SubLocation.parent_id)
         .filter(SubLocation.id.in_(sub_ids)).distinct().order_by(ParentLocation.name).all())
-    return render_template("admin_dashboard.html", pending_sessions=pending_sessions,
+    parent_filter = request.args.get("parent_id", type=int)
+    if parent_filter and parent_filter not in {p.id for p in parent_locations}:
+        abort(403)
+    if not parent_filter and parent_locations:
+        parent_filter = parent_locations[0].id
+    display_ids = ([sub.id for sub in SubLocation.query.filter(SubLocation.id.in_(sub_ids),
+                    SubLocation.parent_id == parent_filter).all()] if parent_filter else sub_ids)
+    pending_sessions = (InventorySession.query.filter(InventorySession.sub_location_id.in_(display_ids),
+        InventorySession.status == "submitted").order_by(InventorySession.submitted_at.desc()).all())
+    pending_unknowns = (UnknownItem.query.filter(UnknownItem.sub_location_id.in_(display_ids),
+        UnknownItem.status == "pending").order_by(UnknownItem.id.desc()).all())
+    users = (User.query.join(UserSubLocationAccess, User.id == UserSubLocationAccess.user_id)
+        .filter(UserSubLocationAccess.sub_location_id.in_(display_ids), User.status == "active")
+        .distinct().order_by(User.full_name).all())
+    sub_locations = SubLocation.query.filter(SubLocation.id.in_(sub_ids), SubLocation.active == True).order_by(SubLocation.name).all()
+    return render_template("admin_dashboard.html", parent_filter=parent_filter,
+        display_sub_ids=set(display_ids), pending_sessions=pending_sessions,
         pending_unknowns=pending_unknowns, users=users, sub_locations=sub_locations, parent_locations=parent_locations)
 
 @app.route("/admin/session/<int:session_id>", methods=["GET", "POST"])
@@ -1040,7 +1187,7 @@ def admin_dashboard():
 def admin_review_session(session_id):
     user = current_user()
     inv = db.session.get(InventorySession, session_id)
-    if not inv or not can_access_sub(user, inv.sub_location_id):
+    if not inv or not can_review_parent_inventory(user, inv.sub_location_id):
         abort(403)
     if request.method == "POST":
         if inv.status != "submitted":
@@ -1056,20 +1203,25 @@ def admin_review_session(session_id):
             inv.approved_by_id = user.id
             recalc_session(inv)
             db.session.commit()
-            body = (f"Inventory #{inv.id} approved.\nLocation: {inv.sub_location.display_name}\n"
-                    f"Approved by: {user.full_name}\nTotal units: {inv.total_quantity}\n"
-                    f"Total inventory value: ${inv.total_value}\n\nGL Summary\n")
-            body += "\n".join(f"{gl}: ${total}" for gl, total in gl_totals(inv)) or "No GL totals available."
-            recipients = ([inv.created_by.email] + [a.email for a in parent_admins(inv.sub_location.parent_id)]
-                          + extra_recipients("inventory_approved"))
-            sent = send_email(recipients, f"Inventory approved - {inv.sub_location.name}", body,
-                [(f"inventory_session_{inv.id}.csv", "text/csv", session_csv_bytes(inv))], event="inventory_approved")
+            values = {"location": inv.sub_location.display_name, "session_id": str(inv.id),
+                      "approver": user.full_name, "quantity": str(inv.total_quantity),
+                      "total": f"{inv.total_value:.2f}",
+                      "gl_summary": "\n".join(f"{gl}: ${total:.2f}" for gl, total in gl_totals(inv)) or "No GL totals",
+                      "report_url": app_link("admin_review_session", session_id=inv.id)}
+            subject, body = render_email("inventory_approved", values)
+            # Final financial summaries go to assigned parent admins and explicitly configured recipients.
+            # No CSV attachment or individual item list is included.
+            recipients = ([a.email for a in parent_admins(inv.sub_location.parent_id)]
+                          + parent_notification_recipients(inv.sub_location.parent_id, "inventory_approved"))
+            sent = send_email(recipients, subject, body, event="inventory_approved") if recipients else False
+            if not recipients:
+                app.logger.warning("No approved-summary recipients for inventory %s", inv.id)
             flash("Inventory approved." + (" Email notification failed." if not sent else ""), "success" if sent else "error")
         elif action == "reject":
             inv.status = "rejected"
             inv.rejection_note = request.form.get("rejection_note", "").strip() or "No note provided"
             db.session.commit()
-            send_email([inv.created_by.email] + extra_recipients("inventory_rejected"),
+            send_email([inv.created_by.email] + parent_notification_recipients(inv.sub_location.parent_id, "inventory_rejected"),
                        f"Inventory rejected - {inv.sub_location.name}",
                        f"Inventory session #{inv.id} was rejected.\nReason: {inv.rejection_note}", event="inventory_rejected")
             flash("Inventory rejected; it remains available in history.", "success")
@@ -1085,7 +1237,7 @@ def admin_review_session(session_id):
 def admin_review_unknown(unknown_id):
     user = current_user()
     unknown = db.session.get(UnknownItem, unknown_id)
-    if not unknown or not can_access_sub(user, unknown.sub_location_id):
+    if not unknown or not can_review_parent_inventory(user, unknown.sub_location_id):
         abort(403)
     inv = unknown.session_ref
     company_id = unknown.sub_location.parent.company_id
@@ -1252,9 +1404,10 @@ def super_admin_dashboard():
                     db.session.add(UserSubLocationAccess(user_id=u.id, sub_location_id=sub_id))
                 db.session.commit()
                 # Initial password delivered as requested; must be changed immediately after login.
-                sent = send_email(u.email, "Your Invotra account is ready",
-                    f"Welcome to Invotra.\nEmail: {u.email}\nOne-time temporary password: {temporary}\n"
-                    f"Change it on first sign in.\nIf you did not expect this message, contact your administrator.", event="account_created")
+                subject, body = render_email("account_created", {
+                    "name": u.full_name, "email": u.email, "temporary_password": temporary,
+                    "login_url": app_link("login")})
+                sent = send_email(u.email, subject, body, event="account_created")
                 flash("Account created." + (" Welcome email failed; use password reset to activate." if not sent else " Welcome email sent."),
                       "success" if sent else "error")
         elif action == "assign_user":
@@ -1266,26 +1419,61 @@ def super_admin_dashboard():
                 db.session.add(UserSubLocationAccess(user_id=u.id, sub_location_id=sub.id))
                 db.session.commit()
             flash("User assigned to location.", "success")
+        elif action == "save_email_template":
+            event = request.form.get("email_event", "")
+            subject = request.form.get("email_subject", "").strip()
+            body = request.form.get("email_body", "").strip()
+            if event not in EMAIL_DEFAULTS or not subject or len(subject) > 250 or not body or len(body) > 8000:
+                flash("Choose a supported email and provide a subject and message.", "error")
+            else:
+                record = EmailTemplate.query.filter_by(event=event).first()
+                if not record:
+                    record = EmailTemplate(event=event)
+                    db.session.add(record)
+                record.subject = subject
+                record.body = body
+                db.session.commit()
+                flash("Email template saved.", "success")
         elif action == "save_notifications":
-            for event in ("inventory_submitted_user", "inventory_submitted_admin", "inventory_approved",
-                          "inventory_rejected", "subunit_requested", "account_requested"):
+            parent_id = form_int("notification_parent_id")
+            if not db.session.get(ParentLocation, parent_id):
+                abort(400)
+            for event in ("inventory_submitted_user", "inventory_submitted_admin",
+                          "inventory_approved", "inventory_rejected"):
                 extra = request.form.get(event, "").strip()
-                if len(extra)>2000:
+                if len(extra) > 2000:
                     abort(400)
-                rule = NotificationRule.query.filter_by(event=event).first()
+                rule = ParentNotificationRule.query.filter_by(parent_id=parent_id, event=event).first()
                 if not rule:
-                    rule = NotificationRule(event=event)
+                    rule = ParentNotificationRule(parent_id=parent_id, event=event)
                     db.session.add(rule)
                 rule.extra_recipients = extra
             db.session.commit()
-            flash("Email routing saved. Default user/admin notifications remain enabled.", "success")
+            flash("Email routing saved for this parent location.", "success")
         else:
             abort(400)
+        if action == "save_notifications":
+            return redirect(url_for("super_admin_dashboard", notification_parent_id=parent_id))
         return redirect(url_for("super_admin_dashboard"))
     companies = Company.query.order_by(Company.name).all()
     parents = ParentLocation.query.order_by(ParentLocation.name).all()
     subs = SubLocation.query.order_by(SubLocation.name).all()
     users = User.query.order_by(User.full_name).all()
+    selected_parent_id = request.args.get("parent_id", type=int)
+    if selected_parent_id and not any(p.id == selected_parent_id for p in parents):
+        abort(404)
+    if selected_parent_id:
+        displayed_sub_ids = {sub.id for sub in subs if sub.parent_id == selected_parent_id}
+        displayed_users = (User.query.join(UserSubLocationAccess, User.id == UserSubLocationAccess.user_id)
+                           .filter(UserSubLocationAccess.sub_location_id.in_(displayed_sub_ids))
+                           .distinct().order_by(User.full_name).all())
+    else:
+        displayed_sub_ids = set()
+        displayed_users = []
+    notification_parent_id = request.args.get("notification_parent_id", type=int)
+    if notification_parent_id and not any(p.id == notification_parent_id for p in parents):
+        abort(404)
+    notification_rules = {r.event: r.extra_recipients for r in ParentNotificationRule.query.filter_by(parent_id=notification_parent_id).all()} if notification_parent_id else {}
     gls = GLAccount.query.filter_by(active=True).order_by(GLAccount.company_id, GLAccount.description).all()
     requests = SubLocationRequest.query.filter_by(status="pending").order_by(SubLocationRequest.created_at.desc()).all()
     account_requests = UserAccessRequest.query.filter_by(status="pending").order_by(UserAccessRequest.created_at.desc()).all()
@@ -1293,7 +1481,12 @@ def super_admin_dashboard():
     deliveries = EmailDelivery.query.order_by(EmailDelivery.id.desc()).limit(15).all()
     return render_template("super_admin_dashboard.html", companies=companies, parents=parents,
         subs=subs, users=users, gls=gls, requests=requests, account_requests=account_requests,
-        notifications=notifications, deliveries=deliveries)
+        notifications=notifications, deliveries=deliveries,
+        displayed_users=displayed_users, displayed_sub_ids=displayed_sub_ids,
+        selected_parent_id=selected_parent_id, notification_parent_id=notification_parent_id,
+        notification_rules=notification_rules,
+        email_templates={e.event: {"subject": e.subject, "body": e.body} for e in EmailTemplate.query.all()},
+        email_defaults=EMAIL_DEFAULTS)
 
 @app.route("/super-admin/delete-user/<int:user_id>", methods=["POST"])
 @login_required
@@ -1373,8 +1566,10 @@ def super_admin_user_request(req_id, decision):
         db.session.add(UserSubLocationAccess(user_id=u.id, sub_location_id=req.sub_location_id))
         req.status = "approved"
         db.session.commit()
-        send_email(u.email, "Your Invotra account is ready",
-                   f"Your temporary password is: {temporary}\nPlease change it on first sign in.", event="account_created")
+        subject, body = render_email("account_created", {
+            "name": u.full_name, "email": u.email, "temporary_password": temporary,
+            "login_url": app_link("login")})
+        send_email(u.email, subject, body, event="account_created")
     else:
         req.status = "rejected"
         db.session.commit()
@@ -1468,10 +1663,33 @@ def download_master(company_id):
 def inventory_csv_download(session_id):
     inv = db.session.get(InventorySession, session_id)
     user = current_user()
-    if not inv or (inv.created_by_user_id != user.id and (user.role not in ("admin","super_admin") or not can_access_sub(user, inv.sub_location_id))):
+    if not inv or (inv.created_by_user_id != user.id and
+        not (can_access_sub(user, inv.sub_location_id) and
+             (user.role in ("admin", "super_admin") or inv.status == "approved"))):
         abort(403)
     return Response(session_csv_bytes(inv), mimetype="text/csv", headers={
         "Content-Disposition": f"attachment; filename=invotra_inventory_{session_id}.csv"})
+
+
+@app.route("/super-admin/test-gl-summary", methods=["POST"])
+@login_required
+@role_required("super_admin")
+def test_gl_summary():
+    """Send an actual summary for a past approved session to the requesting super admin only."""
+    inv = InventorySession.query.filter_by(status="approved").order_by(InventorySession.approved_at.desc()).first()
+    if not inv:
+        flash("Approve a test inventory first; there is no approved session to summarize.", "error")
+        return redirect(url_for("super_admin_dashboard", notification_parent_id=request.form.get("notification_parent_id")))
+    values = {"location": inv.sub_location.display_name, "session_id": str(inv.id),
+              "approver": inv.approved_by.full_name if inv.approved_by else "Invotra administrator",
+              "quantity": str(inv.total_quantity), "total": f"{inv.total_value:.2f}",
+              "gl_summary": "\n".join(f"{gl}: ${total:.2f}" for gl,total in gl_totals(inv)) or "No GL totals",
+              "report_url": app_link("admin_review_session", session_id=inv.id)}
+    subject, body = render_email("inventory_approved", values)
+    ok = send_email(current_user().email, "[TEST] " + subject, body, event="inventory_approved_test")
+    flash("Sample GL summary sent to your email." if ok else "Sample email failed. Check the delivery log and Render logs.",
+          "success" if ok else "error")
+    return redirect(url_for("super_admin_dashboard", notification_parent_id=request.form.get("notification_parent_id")) + "#notifications")
 
 
 @app.route("/super-admin/test-email", methods=["POST"])
