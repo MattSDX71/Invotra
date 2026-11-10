@@ -1,31 +1,45 @@
-{% extends 'base.html' %}{% block title %}Inventory #{{ inv.id }} | Invotra{% endblock %}{% block content %}
-<div class="hero"><h1>Inventory #{{ inv.id }}</h1><p>{{ inv.sub_location.display_name }} · Counted by {{ inv.created_by.full_name }}</p>
-<span class="pill">{{ inv.status|replace('_',' ')|title }}</span></div>
-<div class="grid grid-3" style="margin-top:20px"><div class="card"><h3>Units counted</h3><div class="kpi">{{ inv.total_quantity }}</div></div>
-<div class="card"><h3>Preliminary value</h3><div class="kpi">${{ inv.total_value }}</div></div>
-<div class="card"><h3>Missing items pending</h3><div class="kpi">{{ inv.unknown_items|selectattr('status','equalto','pending')|list|length }}</div><p class="muted">Unpriced items currently count at $0 until reviewed.</p></div></div>
+{% extends 'base.html' %}{% block head %}<style>
+.scan-shell{max-width:1120px}.scan-command{border:1px solid var(--line);background:#fff;border-radius:18px;padding:16px}.scan-quantities{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:8px 0 12px}.scan-quantities label{margin:0;position:relative}.scan-quantities input{position:absolute;opacity:0;inset:0}.scan-quantities span{display:block;border:2px solid var(--line);border-radius:12px;padding:11px 4px;text-align:center;font-weight:800;cursor:pointer}.scan-quantities input:checked+span{background:var(--navy);color:white;border-color:var(--navy)}.scan-quantities input:focus-visible+span{outline:3px solid var(--orange)}.scan-command input[name=upc]{font-size:18px;font-variant-numeric:tabular-nums;margin:5px 0 9px}.scan-foot{display:flex;justify-content:space-between;align-items:center;gap:12px}.scan-foot button{min-height:46px}.scan-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.scan-metric{background:white;border:1px solid var(--line);border-radius:16px;padding:12px}.scan-metric .kpi{font-size:clamp(1.1rem,2.5vw,1.8rem)}.scan-metric .muted{font-size:.8rem}.scan-extra{margin-top:16px}.scan-extra summary{cursor:pointer;font-weight:700;padding:12px 0}.scan-extra .card{margin-top:8px}.scan-header{display:flex;justify-content:space-between;align-items:start;gap:8px}.scan-header h1{margin-bottom:3px}.scan-header p{margin:0}.scan-actions{margin-top:12px}.scan-actions button{width:100%;min-height:46px}@media(max-width:650px){body:has(.scan-shell) .content{padding:10px}body:has(.scan-shell) .topbar{height:54px;padding:0 12px}body:has(.scan-shell) .user-button{padding:5px 10px;font-size:.75rem}body:has(.scan-shell) .scan-header h1{font-size:1.1rem}body:has(.scan-shell) .scan-header p{font-size:.7rem}body:has(.scan-shell) .scan-metrics{gap:6px}body:has(.scan-shell) .scan-metric{padding:8px}body:has(.scan-shell) .scan-metric .kpi{font-size:1.1rem}body:has(.scan-shell) .scan-command{padding:12px}body:has(.scan-shell) .scan-quantities span{padding:10px 2px}body:has(.scan-shell) .flash{margin-bottom:7px;padding:7px 10px;font-size:.8rem}body:has(.scan-shell) .scan-extra{margin-top:6px}}
+</style>{% endblock %}{% block title %}Inventory #{{ inv.id }} | Invotra{% endblock %}{% block content %}
+<div class="scan-shell">
+<div class="scan-header"><div><h1>Count inventory <span class="muted">#{{ inv.id }}</span></h1><p class="muted">{{ inv.sub_location.name }} · {{ inv.sub_location.parent.name }}</p></div><span class="pill">{{ inv.status|replace('_',' ')|title }}</span></div>
+<div class="scan-metrics" aria-label="Current inventory summary" style="margin:12px 0">
+ <div class="scan-metric"><div class="muted">Packages counted</div><div class="kpi">{{ '%g'|format(inv.total_quantity|float) }}</div></div>
+ <div class="scan-metric"><div class="muted">Est. value</div><div class="kpi">${{ '%.2f'|format(inv.total_value|float) }}</div></div>
+ <div class="scan-metric"><div class="muted">Missing</div><div class="kpi">{{ inv.unknown_items|selectattr('status','equalto','pending')|list|length }}</div></div>
+</div>
 {% if inv.status == 'in_progress' and inv.created_by_user_id == user.id %}
-<div class="card"><h2>Scan Inventory</h2><p class="muted">Zebra scanner or keyboard · Each and case UPCs are recognized separately · Every scan adds one unit of its packaging type.</p>
-<form method="post" action="{{ url_for('inventory_scan', session_id=inv.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Scan or enter UPC</label>
-<input id="barcode-scan" name="upc" autofocus autocomplete="off" inputmode="numeric" placeholder="Scan a barcode" required>
-<button class="btn btn-primary">Add Scan</button></form></div>
+<section class="scan-command" aria-label="Scan barcode">
+ <h2 style="font-size:1rem;margin:0 0 4px">Quantity per scan</h2>
+ <p class="muted" style="font-size:.8rem;margin:0">0.25 case = one quarter of that case's cost. Each UPCs use the same fractions.</p>
+ <form id="scan-form" method="post" action="{{ url_for('inventory_scan', session_id=inv.id) }}">
+ <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+ <fieldset style="border:0;padding:0;margin:0"><legend class="muted" style="font-size:.75rem">Select amount before scanning</legend>
+ <div class="scan-quantities">{% for amount,label in [('0.25','¼'),('0.5','½'),('0.75','¾'),('1','1')] %}
+ <label><input type="radio" name="scan_qty" value="{{ amount }}" {% if selected_scan_qty==amount %}checked{% endif %} required><span>{{ label }}</span></label>{% endfor %}</div></fieldset>
+ <label for="barcode-scan" style="font-size:.8rem">Barcode (Zebra scanner or keyboard)</label>
+ <input id="barcode-scan" name="upc" autofocus autocomplete="off" inputmode="numeric" placeholder="Scan UPC" required>
+ <div class="scan-foot"><span class="muted" style="font-size:.75rem">Scanner Enter key adds item</span><button class="btn btn-primary" type="submit">Add Scan</button></div>
+ </form>
+</section>
 {% if unknown_upc %}<div class="card modal-card"><h2>New / Unrecognized Item</h2>
 <p class="muted">UPC <strong>{{ unknown_upc }}</strong> isn't in this company's master. Enter the name and a suggested GL; the admin will set pricing and final UPC details.</p>
 <form method="post" action="{{ url_for('inventory_unknown_submit', session_id=inv.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-<input type="hidden" name="scanned_upc" value="{{ unknown_upc }}">
+<input type="hidden" name="scanned_upc" value="{{ unknown_upc }}"><input type="hidden" name="scan_qty" value="{{ selected_scan_qty }}">
 <label>Specific item name</label><input name="proposed_name" placeholder="Example: Coca Cola 20 oz Cherry Flavor" required maxlength="255" autofocus>
 <label>Suggested GL account</label><select name="proposed_gl_account_id" required><option value="">Choose a GL</option>{% for gl in gl_accounts %}<option value="{{ gl.id }}">{{ gl.label }}</option>{% endfor %}</select>
 <button class="btn btn-primary">Add Missing Item</button> <a class="btn" href="{{ url_for('inventory_session', session_id=inv.id) }}">Cancel</a></form></div>{% endif %}
-<div class="card"><form method="post" action="{{ url_for('inventory_submit', session_id=inv.id) }}" onsubmit="return confirm('Submit this inventory for review? You will not be able to make further edits.');"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+<div class="scan-actions"><form method="post" action="{{ url_for('inventory_submit', session_id=inv.id) }}" onsubmit="return confirm('Submit this inventory for review? You will not be able to make further edits.');"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <button class="btn btn-dark">Finish Inventory &amp; Send for Approval</button></form></div>{% endif %}
-<div class="grid grid-2"><div class="card"><h2>Item Counts <a class="btn btn-small" style="float:right" href="{{ url_for('inventory_csv_download',session_id=inv.id) }}">Download CSV</a></h2>
+<details class="scan-extra" {% if inv.status != "in_progress" %}open{% endif %}><summary>View item counts and GL totals</summary><div class="grid grid-2"><div class="card"><h2>Item Counts <a class="btn btn-small" style="float:right" href="{{ url_for('inventory_csv_download',session_id=inv.id) }}">Download CSV</a></h2>
 <table><thead><tr><th>Item</th><th>UPC</th><th>Pack</th><th>GL</th><th>Qty</th><th>Value</th><th></th></tr></thead><tbody>
 {% for l in inv.lines %}<tr><td>{{ l.item_name_snapshot }}</td><td>{{ l.scanned_upc }}</td><td>{{ l.scan_type }}</td>
 <td>{{ l.gl_label_snapshot }}</td><td>{{ l.quantity }}</td><td>${{ l.extended_value }}</td><td>
 {% if inv.status=='in_progress' and inv.created_by_user_id==user.id %}
 <form method="post" action="{{ url_for('edit_inventory_line',session_id=inv.id,line_id=l.id) }}" style="display:flex;gap:5px;white-space:nowrap"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-<input style="width:85px;margin:0" type="number" name="quantity" value="{{ l.quantity }}" min="0" max="100000" aria-label="Change quantity for {{ l.item_name_snapshot }}">
+<input style="width:85px;margin:0" type="number" name="quantity" value="{{ l.quantity }}" min="0" max="100000" step="0.25" aria-label="Change quantity for {{ l.item_name_snapshot }}">
 <button class="btn btn-small" title="Save quantity">Save</button></form>{% endif %}</td></tr>{% else %}<tr><td colspan="7">Nothing scanned yet.</td></tr>{% endfor %}</tbody></table></div>
 <div class="card"><h2>GL Totals</h2><table><thead><tr><th>GL Account</th><th>Value</th></tr></thead><tbody>
-{% for gl,total in gl_totals %}<tr><td>{{ gl }}</td><td>${{ total }}</td></tr>{% else %}<tr><td colspan="2">No totals yet.</td></tr>{% endfor %}</tbody></table></div></div>
+{% for gl,total in gl_totals %}<tr><td>{{ gl }}</td><td>${{ total }}</td></tr>{% else %}<tr><td colspan="2">No totals yet.</td></tr>{% endfor %}</tbody></table></div></div></details></div>
+<script>document.addEventListener("DOMContentLoaded",()=>{const scan=document.getElementById("barcode-scan");if(scan && !document.querySelector(".modal-card")) scan.focus({preventScroll:true});if(document.querySelector(".modal-card")){document.querySelector(".modal-card input[name=proposed_name]")?.focus({preventScroll:true});}});</script>
 {% endblock %}

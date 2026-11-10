@@ -123,3 +123,6 @@ Also review these live smoke checks **in a test company/subunit**:
 - `.env.example`: environment-variable checklist
 
 Dependency note: Flask is pinned to 3.1.3 to include an upstream session/cache header security fix available as of this release.
+
+## Public website and dashboard subdomain
+See [DOMAIN_AND_EMAIL_SETUP.md](DOMAIN_AND_EMAIL_SETUP.md). The supplied public preview is in `website/index.html` and should be deployed as its own Render Static Site; the Flask Web Service stays connected to its `/data` disk on `dashboard.invotra.us`. Account and approval notification wording is editable in Super Admin → Notifications.

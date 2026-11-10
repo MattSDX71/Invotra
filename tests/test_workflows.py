@@ -262,3 +262,44 @@ def test_all_major_pages_render_without_500_and_permissions_hold(env):
     assert u.get('/super-admin').status_code==302
     assert u.get('/admin').status_code==302
     assert u.get('/healthz').status_code==200
+
+
+def test_email_templates_approval_links_and_admin_only_gl_email(env):
+    ids, outgoing = env
+    manager = client(); counter = client(); superuser = client()
+    login(manager, 'manager@example.com', 'manager-password123!')
+    login(counter, 'counter1@example.com', 'counter-password123!')
+    login(superuser, 'super@example.com', 'firstloginpassword123!')
+    # Super admin can edit the invitation wording, and the login URL is substituted.
+    res = post(superuser, '/super-admin', {'action':'save_email_template',
+        'email_event':'account_created', 'email_subject':'Welcome {name}',
+        'email_body':'Use {login_url} to sign in, {name}. Password: {temporary_password}'})
+    assert res.status_code == 200
+    with a.app.app_context():
+        subject, body = a.render_email('account_created', {'name':'Test Person',
+            'login_url':'https://dashboard.invotra.us/login', 'temporary_password':'abc123'})
+        assert subject == 'Welcome Test Person'
+        assert 'https://dashboard.invotra.us/login' in body
+    sid = start(counter, ids['store'])
+    post(counter, f'/inventory/{sid}/scan', {'upc':'000123456789'})
+    post(counter, f'/inventory/{sid}/submit')
+    submitted = [x for x in outgoing.call_args_list if x.kwargs.get('event')=='inventory_submitted_admin']
+    assert len(submitted)==1
+    assert f'https://dashboard.invotra.us/admin/session/{sid}' in submitted[0].args[2]
+    post(manager, f'/admin/session/{sid}', {'action':'approve'})
+    approved = [x for x in outgoing.call_args_list if x.kwargs.get('event')=='inventory_approved']
+    assert len(approved)==1
+    assert approved[0].kwargs.get('attachments') is None and len(approved[0].args)==3
+    assert approved[0].args[0] == ['manager@example.com']
+    assert '60110020' in approved[0].args[2]
+    assert f'https://dashboard.invotra.us/admin/session/{sid}' in approved[0].args[2]
+    # A sample approval email can be tested without approving another session.
+    assert post(superuser, '/super-admin/test-gl-summary').status_code==200
+    assert any(x.kwargs.get('event')=='inventory_approved_test' for x in outgoing.call_args_list)
+
+
+def test_email_html_escapes_product_names():
+    safe=a.mail_html('Product <script>alert(1)</script>\nhttps://dashboard.invotra.us/login')
+    assert '<script>' not in safe
+    assert '&lt;script&gt;' in safe
+    assert '<a href="https://dashboard.invotra.us/login"' in safe
