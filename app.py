@@ -374,20 +374,47 @@ def form_int(key: str) -> int:
         abort(400, description=f"Invalid {key}")
 
 
+def barcode_key(raw: str | None) -> str:
+    """Treat a single optional leading 0 as equivalent for numeric barcodes.
+
+    Do not strip all zeroes: 001234 must not silently become 1234.
+    Preserve stored and scanned UPCs for audit/export.
+    """
+    code = (raw or "").strip()
+    if code.isascii() and code.isdigit() and len(code) > 1 and code.startswith("0"):
+        return code[1:]
+    return code
+
+
+def barcode_variants(raw: str | None) -> set[str]:
+    code = (raw or "").strip()
+    if not code:
+        return set()
+    if not (code.isascii() and code.isdigit()):
+        return {code}
+    key = barcode_key(code)
+    return {key, "0" + key} if key else {code}
+
+
+def matching_master_items(company_id: int, barcodes: list[str]) -> list[ItemMaster]:
+    candidates: set[str] = set()
+    for code in barcodes:
+        candidates.update(barcode_variants(code))
+    if not candidates:
+        return []
+    return ItemMaster.query.filter(
+        ItemMaster.company_id == company_id,
+        or_(ItemMaster.each_upc.in_(candidates), ItemMaster.case_upc.in_(candidates))
+    ).all()
+
+
 def unique_upcs(company_id: int, each_upc: str | None, case_upc: str | None,
                 excluding_item_id: int | None = None) -> bool:
-    if each_upc and case_upc and each_upc == case_upc:
+    # Disallow two scan types from responding to the same physical barcode.
+    if each_upc and case_upc and barcode_key(each_upc) == barcode_key(case_upc):
         return False
-    for code in (each_upc, case_upc):
-        if not code:
-            continue
-        q = ItemMaster.query.filter(ItemMaster.company_id == company_id,
-                 or_(ItemMaster.each_upc == code, ItemMaster.case_upc == code))
-        if excluding_item_id is not None:
-            q = q.filter(ItemMaster.id != excluding_item_id)
-        if q.first():
-            return False
-    return True
+    matches = matching_master_items(company_id, [c for c in (each_upc, case_upc) if c])
+    return all(item.id == excluding_item_id for item in matches)
 
 
 def extra_recipients(event: str) -> list[str]:
@@ -569,12 +596,23 @@ def recalc_session(inv: InventorySession) -> None:
     inv.total_value = Decimal(str(val)).quantize(Decimal("0.01"))
 
 def find_item(company_id: int, upc: str) -> tuple[Optional[ItemMaster], Optional[str], Decimal]:
-    item = ItemMaster.query.filter_by(company_id=company_id, each_upc=upc, active=True).first()
-    if item:
-        return item, "each", Decimal(str(item.each_cost or 0))
-    item = ItemMaster.query.filter_by(company_id=company_id, case_upc=upc, active=True).first()
-    if item:
-        return item, "case", Decimal(str(item.case_cost or 0))
+    # Exact and one-leading-zero UPCs resolve to the same product.  If two
+    # records were imported in the past with colliding codes, fail safely.
+    matches: list[tuple[ItemMaster, str]] = []
+    wanted = barcode_key(upc)
+    for item in matching_master_items(company_id, [upc]):
+        if not item.active:
+            continue
+        if item.each_upc and barcode_key(item.each_upc) == wanted:
+            matches.append((item, "each"))
+        if item.case_upc and barcode_key(item.case_upc) == wanted:
+            matches.append((item, "case"))
+    if len(matches) > 1:
+        raise ValueError(f"Barcode {upc} matches multiple master UPCs. Ask an administrator to resolve the duplicate.")
+    if matches:
+        item, scan_type = matches[0]
+        unit_cost = item.case_cost if scan_type == "case" else item.each_cost
+        return item, scan_type, Decimal(str(unit_cost or 0))
     return None, None, Decimal("0.00")
 
 
@@ -954,8 +992,9 @@ def inventory_scan(session_id):
     scan_qty_url = str(increment.normalize())
     company_id = inv.sub_location.parent.company_id
     # When a pending unknown UPC is scanned again, increment the existing missing-item count.
-    pending = (UnknownItem.query.filter_by(session_id=inv.id, scanned_upc=upc, status="pending")
-               .first())
+    pending = next((candidate for candidate in UnknownItem.query.filter_by(
+        session_id=inv.id, status="pending").all()
+        if barcode_key(candidate.scanned_upc) == barcode_key(upc)), None)
     if pending:
         line = InventoryLine.query.filter_by(unknown_item_id=pending.id, session_id=inv.id).first()
         if line:
@@ -965,10 +1004,18 @@ def inventory_scan(session_id):
             db.session.commit()
             flash("Missing item count increased. Admin will price it.", "success")
             return redirect(url_for("inventory_session", session_id=inv.id, scan_qty=scan_qty_url))
-    item, scan_type, unit_cost = find_item(company_id, upc)
+    try:
+        item, scan_type, unit_cost = find_item(company_id, upc)
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("inventory_session", session_id=session_id, scan_qty=scan_qty_url))
     if not item:
         return redirect(url_for("inventory_session", session_id=session_id, unknown_upc=upc, scan_qty=scan_qty_url))
-    line = InventoryLine.query.filter_by(session_id=inv.id, scanned_upc=upc, scan_type=scan_type).first()
+    # Group equivalent scan codes in one line, even if the scanner alternates
+    # between 01234 and 1234 in the middle of an inventory.
+    line = InventoryLine.query.filter_by(
+        session_id=inv.id, item_master_id=item.id, scan_type=scan_type
+    ).first()
     if line:
         line.quantity += increment
         line.extended_value = Decimal(str(line.unit_cost_snapshot)) * line.quantity
@@ -1004,11 +1051,17 @@ def inventory_unknown_submit(session_id):
         or gl.company_id != company_id):
         flash("Please enter a specific item name and a GL account from this company.", "error")
         return redirect(url_for("inventory_session", session_id=session_id, unknown_upc=upc))
-    item, _, _ = find_item(company_id, upc)
+    try:
+        item, _, _ = find_item(company_id, upc)
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("inventory_session", session_id=session_id))
     if item:
         flash("This barcode is already in the master list. Scan it again.", "error")
         return redirect(url_for("inventory_session", session_id=session_id))
-    prior = UnknownItem.query.filter_by(session_id=inv.id, scanned_upc=upc, status="pending").first()
+    prior = next((candidate for candidate in UnknownItem.query.filter_by(
+        session_id=inv.id, status="pending").all()
+        if barcode_key(candidate.scanned_upc) == barcode_key(upc)), None)
     if prior:
         flash("This missing item is already counted; scan it again to increase quantity.", "error")
         return redirect(url_for("inventory_session", session_id=session_id))
@@ -1270,11 +1323,16 @@ def admin_review_unknown(unknown_id):
             flash(str(exc), "error")
             return redirect(url_for("admin_review_unknown", unknown_id=unknown.id))
         if (not item_name or len(item_name) > 255 or not gl or not gl.active or gl.company_id != company_id or
-            not (each_upc or case_upc) or not (unknown.scanned_upc == each_upc or unknown.scanned_upc == case_upc)):
+            not (each_upc or case_upc) or not (barcode_key(unknown.scanned_upc) == barcode_key(each_upc) or
+                 barcode_key(unknown.scanned_upc) == barcode_key(case_upc))):
             flash("Enter a valid name, company GL, and the scanned barcode as either each or case UPC.", "error")
             return redirect(url_for("admin_review_unknown", unknown_id=unknown.id))
         if not unique_upcs(company_id, each_upc, case_upc):
-            existing, _, _ = find_item(company_id, unknown.scanned_upc)
+            try:
+                existing, _, _ = find_item(company_id, unknown.scanned_upc)
+            except ValueError as exc:
+                flash(str(exc), "error")
+                return redirect(url_for("admin_review_unknown", unknown_id=unknown.id))
             if existing:
                 item = existing
             else:
@@ -1291,7 +1349,8 @@ def admin_review_unknown(unknown_id):
         unknown.reviewed_at = datetime.utcnow()
         unknown.converted_item_master_id = item.id
         if line:
-            scan_type = "case" if unknown.scanned_upc == item.case_upc else "each"
+            scan_type = "case" if (item.case_upc and
+                         barcode_key(unknown.scanned_upc) == barcode_key(item.case_upc)) else "each"
             line.item_master_id = item.id
             line.item_name_snapshot = item.item_name
             line.gl_account_id = item.gl_account_id
@@ -1604,18 +1663,16 @@ def upload_master_sheet():
                 gl = locate_gl(company.id, row.get("GL Account") or "")
                 if not name or len(name)>255 or not gl or not (each or case_upc):
                     raise ValueError(f"Row {lineno}: missing name, active GL or UPC")
-                if (each and len(each)>100) or (case_upc and len(case_upc)>100) or (each and case_upc and each==case_upc):
+                if (each and len(each)>100) or (case_upc and len(case_upc)>100) or (each and case_upc and barcode_key(each)==barcode_key(case_upc)):
                     raise ValueError(f"Row {lineno}: invalid or duplicated each/case UPC")
                 for code in (each, case_upc):
-                    if code and code in seen_codes:
-                        raise ValueError(f"Row {lineno}: duplicate UPC {code} in this file")
+                    if code and barcode_key(code) in seen_codes:
+                        raise ValueError(f"Row {lineno}: duplicate equivalent UPC {code} in this file")
                     if code:
-                        seen_codes.add(code)
+                        seen_codes.add(barcode_key(code))
                 ec = parse_cost(row.get("Each Cost"), f"Row {lineno} each cost")
                 cc = parse_cost(row.get("Case Cost"), f"Row {lineno} case cost")
-                matches = (ItemMaster.query.filter(ItemMaster.company_id==company.id,
-                           or_(ItemMaster.each_upc.in_([c for c in (each, case_upc) if c]),
-                               ItemMaster.case_upc.in_([c for c in (each, case_upc) if c]))).all())
+                matches = matching_master_items(company.id, [c for c in (each, case_upc) if c])
                 if len(matches)>1:
                     raise ValueError(f"Row {lineno}: UPCs conflict with multiple existing products")
                 existing = matches[0] if matches else None
